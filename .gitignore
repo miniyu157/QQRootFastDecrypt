@@ -1,0 +1,10 @@
+*
+
+!/.git
+!/.gitignore
+!/README.md
+
+!/qqnt_decrypt.sh
+!/export_chats.py
+!/get_qqnt_key.sh
+!/sqlite_to_json.py
