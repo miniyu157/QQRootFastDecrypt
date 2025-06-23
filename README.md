@@ -1,4 +1,4 @@
-# QQRootFastDecrypt
+# [持续更新] QQRootFastDecrypt
 
 针对于已 root 安卓设备的快捷导出 QQ 聊天记录的脚本
 
@@ -12,6 +12,8 @@
 > - 其他工具
 >   - [# get_qqnt_key.sh](#get_qqnt_keysh) 自动扫描 QQ 账号并计算 key。
 >   - [# sqlite_to_json.py](#sqlite_to_jsonpy) SQLite 到 JSON 导出工具。
+> - 未完成的
+>   - [new_export_chats.py](#new_export_chatspy) 基于 export_chats.py，重构全部逻辑
 
 ## 安装依赖
 
@@ -26,6 +28,43 @@ pip install blackboxprotobuf
 ```bash
 git clone https://github.com/miniyu157/QQRootFastDecrypt.git
 ```
+
+## 未完成的
+
+### new_export_chats.py
+
+基于 `export_chats.py` 重构，用于从数据库中导出可读文本，差异：
+
+- 目前只有一个导出模式（即按全局时间线导出），未来添加各种导出模式，例如
+
+  - 全量导出模式 以及 文本导出模式
+  - 限制时间范围
+  - 自定义用户标识（使用`profile_info.db`），例如 昵称、昵称/备注、QQ 号码、UID 或自定义占位符
+  - 私聊
+    - 导出某个分组中的全部好友
+    - 导出全部好友
+    - 导出单个好友（列出好友列表）
+  - 群聊
+    - 列出群聊列表，导出某个群聊的全部聊天记录
+
+- 目前仅使用了 `nt_msg.decrypt.db` 数据库，所以用户标识全是 UID
+- 提供了基本全部消息类型的支持：
+  - 文本、文件、图片、视频、语音、QQ 卡片、红包等等
+  - 引用消息包含：原发送人、接收人、时间戳、消息内容
+  - 系统灰色字包含戳一戳、撤回消息等系统提示，忽略好友火花提示以及无内容的系统提示等
+    - > ```python
+      > # 定义需要被忽略的系统提示的正则表达式列表
+      > IGNORE_GRAY_TIP_PATTERNS_RAW = [
+      >     r"^你已对此会话开启消息免打扰$",
+      >     r"^自定义撤回消息",
+      >     r"由于.*未互发消息",
+      >     r"你们超过.*未互发消息",
+      >     r"你们的.*即将彻底消失",
+      > ]
+      > ```
+  - 图片区分：
+    **图片** **闪照** **动画表情** **商城表情(显示为 "[表情描述]"")** **QQ 表情**
+  - 红包区分： **普通红包** 与 **口令红包**
 
 ## 主要工具
 
