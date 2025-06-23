@@ -4,6 +4,8 @@
 
 文档中的环境 [termux](https://github.com/termux/termux-app/releases) (com.termux) 版本 0.119.0-beta.2(1021)
 
+已解密的数据库统一命名为 `xxx.decrypt.db`
+
 ## 目录
 
 > - 主要工具
@@ -40,7 +42,7 @@ git clone https://github.com/miniyu157/QQRootFastDecrypt.git
   - 全量导出模式 以及 文本导出模式
   - 导出格式： txt 以及 markdown
   - 限制时间范围
-  - 自定义用户标识（使用`profile_info.db`），例如 昵称、昵称/备注、QQ 号码、UID 或自定义占位符
+  - 自定义用户标识（使用 `profile_info.decrypt.db`），例如 昵称、昵称/备注、QQ 号码、UID 或自定义占位符
   - 私聊
     - 导出某个分组中的全部好友
     - 导出全部好友
@@ -49,6 +51,8 @@ git clone https://github.com/miniyu157/QQRootFastDecrypt.git
     - 列出群聊列表，导出某个群聊的全部聊天记录
 
 - 目前仅使用了 `nt_msg.decrypt.db` 数据库，所以用户标识全是 UID
+- 在脚本所在目录的 `myqq` 文件中读取主人 UID，不存在会提示手动输入(-save 自动保存)
+  > 未来使用 `profile_info.decrypt.db` 后可以输入 QQ 号码解析，与 `qqnt_decrypt.sh` 互相配合
 - 目前提供了基本全部消息类型的支持：
   - 文本、文件、图片、视频、语音、QQ 卡片、红包等
   - 引用消息包含：原发送人、接收人、时间戳、消息内容
@@ -71,7 +75,7 @@ git clone https://github.com/miniyu157/QQRootFastDecrypt.git
 
 ### qqnt_decrypt.sh
 
-自动扫描 qq 账号，计算 key 并自动解密。默认解密 `nt_msg.db` 和 `profile_info.db` 两个数据库，可在源代码底部修改。
+自动扫描 qq 账号，计算 key 并自动解密。默认解密 `nt_msg.decrypt.db` 和 `profile_info.decrypt.db` 两个数据库，可在源代码底部修改。
 
 **快捷启动命令** (粘贴到 termux)
 
