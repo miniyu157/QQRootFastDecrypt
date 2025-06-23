@@ -54,7 +54,7 @@ git clone https://github.com/miniyu157/QQRootFastDecrypt.git
 - 在脚本所在目录的 `myqq` 文件中读取主人 UID，不存在会提示手动输入(-save 自动保存)
   > 未来使用 `profile_info.decrypt.db` 后可以输入 QQ 号码解析，与 `qqnt_decrypt.sh` 互相配合
 - 目前提供了基本全部消息类型的支持：
-  - 文本、文件、图片、视频、语音、QQ 卡片、红包等
+  - 文本、文件、图片、视频、语音 (显示转文字内容)、QQ卡片、红包、视频聊天、语音聊天
   - 引用消息包含：原发送人、接收人、时间戳、消息内容
   - 系统灰色字包含戳一戳、撤回消息等系统提示，忽略好友火花提示以及无内容的系统提示等
     > ```python
@@ -70,6 +70,7 @@ git clone https://github.com/miniyu157/QQRootFastDecrypt.git
   - 图片区分：
     **图片** **闪照** **动画表情** **商城表情(显示为 "[表情描述]"")** **QQ 表情**
   - 红包区分： **普通红包** 与 **口令红包**
+- 尽力抢救损坏数据
 
 ## 主要工具
 
