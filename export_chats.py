@@ -1,459 +1,816 @@
+# -*- coding: utf-8 -*-
+"""
+QQ NT 聊天记录导出工具
+
+功能:
+- 自动从数据库识别主人身份及好友、分组信息。
+- 支持多种导出模式: 全局时间线、全部好友、按分组、指定好友。
+- 支持导出详细的用户信息列表。
+- 支持自定义时间范围筛选。
+- 支持自定义导出的用户标识格式。
+- 自动处理多种消息类型，包括文本、图片、引用、红包、系统提示等。
+- 对无法标准解析的消息提供“内容抢救”机制。
+
+依赖:
+- blackboxprotobuf: 用于解析QQ使用的Protobuf二进制数据格式。
+"""
+
 import sqlite3
-import blackboxprotobuf
-from datetime import datetime
 import os
+import base64
+from datetime import datetime
 import re
 import json
 
-# --- 配置文件 ---
-OUTPUT_DIR = "output_chats"  # 导出文件存放的文件夹
-C2C_DB_FILE = "nt_msg.decrypt.db"  # 聊天记录数据库
-PROFILE_DB_FILE = "profile_info.decrypt.db"  # 好友信息数据库
 
-# --- 表名 ---
-C2C_TABLE = "c2c_msg_table"  # 单聊消息表
-PROFILE_TABLE = "profile_info_v6"  # 用户信息表
-BUDDY_TABLE = "buddy_list"  # 好友列表
+# 尝试导入 blackboxprotobuf
+try:
+    import blackboxprotobuf
+except ImportError:
+    print("错误：缺少 'blackboxprotobuf' 库。")
+    print("请使用 'pip install blackboxprotobuf' 命令进行安装。")
+    exit(1)
 
-# --- 聊天记录表 c2c_msg_table 的列名 ---
-C2C_COL_SENDER_UID = "[40020]"  # 发送者UID
-C2C_COL_PEER_UID = "[40021]"  # 接收者UID
-C2C_COL_MSG_TIME = "[40050]"  # 消息时间戳 (秒)
-C2C_COL_MSG_CONTENT = "[40800]"  # 消息内容 (Protobuf)
+# --- 常量定义 ---
 
-# --- 好友信息库 profile_info.decrypt.db 的列名 ---
-P_COL_UID = '"1000"'  # 通用UID
-P_COL_QQ = '"1002"'  # QQ号
-P_COL_NAME = '"20002"'  # 昵称
-P_COL_REMARK = '"20009"'  # 备注
+# 【文件与路径配置】
+DB_FILENAME = "nt_msg.decrypt.db"  # 解密后的QQ聊天记录数据库文件名
+PROFILE_DB_FILENAME = "profile_info.decrypt.db"  # 主人信息及好友列表数据库
+OUTPUT_DIR = "output_chats"  # 导出文件的存放文件夹
+TIMELINE_FILENAME_BASE = "chat_logs_timeline" # 全局时间线文件名前缀
+FRIENDS_LIST_FILENAME = "friends_list.txt" # 好友信息列表文件名
+ALL_USERS_LIST_FILENAME = "all_cached_users_list.txt" # 全部用户信息列表文件名
 
-# --- Protobuf 内部字段ID ---
-PB_FIELD_MSG_CONTAINER = "40800"  # 消息容器
-PB_FIELD_TEXT = "45101"  # 文本内容
-PB_FIELD_REPLY = "47423"  # 回复内容
+# 【核心数据结构缓存】
+SALVAGE_CACHE = {}
 
+# 【数据库表结构与字段常量】
+# 这些常量基于对QQ NT版数据库的逆向工程得出，是脚本正确读取数据的关键。
+
+# -- 消息数据库 (nt_msg.decrypt.db) --
+TABLE_NAME = "c2c_msg_table"      # C2C（Client to Client）单聊消息表
+COL_SENDER_UID = "40020"         # 发送者UID (字符串，如 u_xxxxxxxx)
+COL_PEER_UID = "40021"           # 【关键】对话对方的UID，作为会话的唯一标识
+COL_TIMESTAMP = "40050"          # 消息时间戳 (秒)
+COL_MSG_CONTENT = "40800"        # 消息内容 (Protobuf格式的二进制数据)
+
+# -- 用户信息数据库 (profile_info.decrypt.db) --
+CATEGORY_LIST_TABLE = "category_list_v2" # 存储分组信息和主人UID的表
+BUDDY_LIST_TABLE = "buddy_list"         # 【关键】好友列表，是判断好友关系的唯一依据
+PROFILE_INFO_TABLE = "profile_info_v6"   # 包含所有用户（好友、非好友）详细信息的缓存表
+# 列名
+PROF_COL_UID = "1000"           # 用户UID
+PROF_COL_QID = "1001"           # 用户QID (可能为null)
+PROF_COL_QQ = "1002"            # 用户QQ号
+PROF_COL_GROUP_ID = "25007"     # 用户所属分组ID
+PROF_COL_GROUP_LIST_PB = "25011" # 存储分组列表的Protobuf字段
+PROF_COL_NICKNAME = "20002"     # 用户昵称
+PROF_COL_REMARK = "20009"       # 用户备注 (由主人设置)
+PROF_COL_SIGNATURE = "20011"    # 个性签名
+
+# -- Protobuf内部字段ID常量 --
+# 分组信息Protobuf
+PB_GROUP_ID = "25007"           # 分组ID
+PB_GROUP_NAME = "25008"         # 分组名称
+# 消息内容Protobuf
+PB_MSG_CONTAINER = "40800"      # 消息段的容器字段，大部分消息内容都包裹在此字段内
+PB_MSG_TYPE = "45002"           # 消息元素的类型ID (例如 1=文本, 2=图片)
+PB_MSG_SUBTYPE = "45003"        # 消息元素的子类型ID (如区分图片和动画表情)
+PB_TEXT_CONTENT = "45101"       # 文本/链接/Email等内容
+PB_ARK_JSON = "47901"           # Ark卡片消息 (其内容通常为JSON格式的字符串)
+PB_RECALLER_NAME = "47705"      # 撤回消息者的昵称 (不可靠，仅作后备)
+PB_RECALLER_UID = "47703"       # 【关键】撤回消息者的UID
+PB_RECALL_SUFFIX = "47713"      # 撤回消息的后缀文本 (例如 "你猜猜撤回了什么。")
+PB_FILE_NAME = "45402"          # 文件名
+PB_CALL_STATUS = "48153"        # 音视频通话状态文本 (如 "通话时长 00:10")
+PB_CALL_TYPE = "48154"          # 通话类型 (1:语音, 2:视频)
+PB_MARKET_FACE_TEXT = "80900"   # 商城表情文本 (如 "[贴贴]")
+PB_IMAGE_IS_FLASH = "45829"     # 图片是否为闪照的标志字段 (1:是闪照)
+PB_REDPACKET_TYPE = "48412"     # 红包类型字段 (2:普通, 6:口令)
+PB_REDPACKET_TITLE = "48443"    # 红包标题 (如 "恭喜发财")
+PB_VOICE_DURATION = "45005"     # 语音消息时长字段 (此为推测值，可能不准)
+PB_VOICE_TO_TEXT = "45923"      # 语音转文字的结果文本
+# 引用消息相关字段
+PB_REPLY_ORIGIN_SENDER_UID = "40020"    # 引用消息中，原消息的发送者UID
+PB_REPLY_ORIGIN_RECEIVER_UID = "40021"  # 引用消息中，原消息的接收者UID
+PB_REPLY_ORIGIN_TS = "47404"            # 引用消息中，原消息的时间戳
+PB_REPLY_ORIGIN_SUMMARY_TEXT = "47413"  # 【关键】原消息的文本摘要，用于快速显示引用内容
+PB_REPLY_ORIGIN_OBJ = "47423"           # 引用消息中，完整的原消息对象
+# 互动灰字提示相关字段
+PB_GRAYTIP_INTERACTIVE_XML = "48214" # 互动类提示的XML内容 (如 "拍一拍")
+
+# 消息元素类型ID -> 可读名称的映射
+MSG_TYPE_MAP = {
+    1: "文本", 2: "图片", 3: "文件", 4: "语音", 5: "视频",
+    6: "QQ表情", 7: "引用", 8: "灰字提示", 9: "红包", 10: "卡片",
+    11: "商城表情", 14: "Markdown", 21: "通话",
+}
 
 class ProfileManager:
-    """管理好友信息，提供UID和昵称/备注之间的转换。"""
+    """
+    负责从profile_info.decrypt.db加载和管理所有用户、好友和分组信息。
+    这是整个脚本的数据中枢，为其他所有功能提供用户信息支持。
+    """
+    def __init__(self, db_path):
+        if not os.path.exists(db_path):
+            print(f"错误: 身份数据库文件 '{db_path}' 不存在。")
+            exit(1)
+        self.db_path = f"file:{db_path}?mode=ro"
+        self.my_uid = ""
+        self.user_info = {}   # {uid: {qq, nickname, remark, group_id, ...}} 好友信息
+        self.group_info = {}  # {group_id: group_name} 分组信息
+        self.all_profiles_cache = {} # {uid: {qq, nickname, ...}} 所有缓存过的用户信息
 
-    def __init__(self, profile_db_path):
-        self.is_enabled = os.path.exists(profile_db_path)
-        self.friends = {}
-        self.my_uid = None
-        if self.is_enabled:
-            print(f"检测到好友信息库 '{profile_db_path}'，启用好友功能。")
-            self._load_data(profile_db_path)
-        else:
-            print(f"未找到好友信息库 '{profile_db_path}'，将仅使用UID。")
-
-    def _load_data(self, db_path):
+    def load_data(self):
+        """
+        加载所有用户信息的总入口。
+        严格遵循 buddy_list 作为好友关系的唯一来源。
+        """
+        print(f"\n正在从 '{PROFILE_DB_FILENAME}' 加载用户信息...")
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            profiles = {
-                uid: {"name": name, "remark": remark}
-                for uid, name, remark in cursor.execute(
-                    f"SELECT {P_COL_UID}, {P_COL_NAME}, {P_COL_REMARK} FROM {PROFILE_TABLE}"
-                )
+            with sqlite3.connect(self.db_path, uri=True) as con:
+                cur = con.cursor()
+                self._load_my_uid(cur)
+                self._load_groups(cur)
+                self._load_all_profiles_cache(cur)
+                self._build_friend_list()
+                if self.my_uid in self.all_profiles_cache:
+                    self.user_info[self.my_uid] = self.all_profiles_cache[self.my_uid]
+                
+                print("用户信息加载完毕。")
+        except sqlite3.Error as e:
+            print(f"\n读取身份数据库时发生错误: {e}")
+            exit(1)
+
+    def _load_my_uid(self, cur):
+        """从category_list_v2表获取主人UID。"""
+        cur.execute(f'SELECT "{PROF_COL_UID}" FROM {CATEGORY_LIST_TABLE} LIMIT 1')
+        result = cur.fetchone()
+        if not result or not result[0]:
+            print(f"错误: 无法在 '{CATEGORY_LIST_TABLE}' 表中找到主人UID。")
+            exit(1)
+        self.my_uid = result[0]
+        print(f"成功识别主人UID: {self.my_uid}")
+
+    def _load_groups(self, cur):
+        """解析Protobuf数据，建立分组ID和分组名称的映射。"""
+        cur.execute(f'SELECT "{PROF_COL_GROUP_LIST_PB}" FROM {CATEGORY_LIST_TABLE} LIMIT 1')
+        pb_data = cur.fetchone()
+        if not pb_data or not pb_data[0]: return
+
+        decoded, _ = blackboxprotobuf.decode_message(pb_data[0])
+        group_list_data = decoded.get(PROF_COL_GROUP_LIST_PB)
+        if not group_list_data: return
+        
+        groups = group_list_data if isinstance(group_list_data, list) else [group_list_data]
+        for group in groups:
+            group_id = group.get(PB_GROUP_ID)
+            group_name = group.get(PB_GROUP_NAME, b'').decode('utf-8', 'ignore')
+            if group_id is not None and group_name:
+                self.group_info[group_id] = group_name
+
+    def _load_all_profiles_cache(self, cur):
+        """将profile_info_v6表的内容全部加载到字典，作为信息缓存。"""
+        query = f'SELECT "{PROF_COL_UID}", "{PROF_COL_QQ}", "{PROF_COL_NICKNAME}", "{PROF_COL_REMARK}", "{PROF_COL_QID}", "{PROF_COL_SIGNATURE}" FROM {PROFILE_INFO_TABLE}'
+        cur.execute(query)
+        for uid, qq, nickname, remark, qid, signature in cur.fetchall():
+            self.all_profiles_cache[uid] = {
+                'qq': qq or uid, 'nickname': nickname or '', 'remark': remark or '', 
+                'qid': qid or '', 'signature': signature or '', 'group_id': -1
             }
-            buddies = cursor.execute(
-                f"SELECT {P_COL_UID}, {P_COL_QQ} FROM {BUDDY_TABLE}"
-            ).fetchall()
-            for uid, qq in buddies:
-                profile_info = profiles.get(uid, {})
-                self.friends[uid] = {
-                    "qq": qq,
-                    "name": profile_info.get("name", f"未知昵称_{uid[:4]}"),
-                    "remark": profile_info.get("remark"),
+
+    def _build_friend_list(self):
+        """以buddy_list为准，从all_profiles_cache中填充好友的详细信息。"""
+        with sqlite3.connect(self.db_path, uri=True) as con:
+            cur = con.cursor()
+            self.user_info = {}
+            query = f'SELECT "{PROF_COL_UID}", "{PROF_COL_QQ}", "{PROF_COL_GROUP_ID}" FROM {BUDDY_LIST_TABLE}'
+            cur.execute(query)
+            for friend_uid, friend_qq, friend_group_id in cur.fetchall():
+                profile_details = self.all_profiles_cache.get(friend_uid, {})
+                self.user_info[friend_uid] = {
+                    'qq': friend_qq or profile_details.get('qq', friend_uid),
+                    'nickname': profile_details.get('nickname', ''),
+                    'remark': profile_details.get('remark', ''),
+                    'qid': profile_details.get('qid', ''),
+                    'signature': profile_details.get('signature', ''),
+                    'group_id': friend_group_id if friend_group_id is not None else 0
                 }
-            print(f"成功加载 {len(self.friends)} 位好友的信息。")
-        except sqlite3.Error as e:
-            print(f"加载好友信息失败: {e}。已禁用好友功能。")
-            self.is_enabled = False
-        finally:
-            if "conn" in locals() and conn:
-                conn.close()
 
-    def find_uid(self, identifier):
-        if not self.is_enabled:
-            return identifier
-        identifier = str(identifier).strip()
-        if identifier.startswith("u_"):
-            return identifier
-        try:
-            conn = sqlite3.connect(PROFILE_DB_FILE)
-            cursor = conn.cursor()
-            query = f"SELECT {P_COL_UID} FROM {BUDDY_TABLE} WHERE {P_COL_QQ} = ?"
-            result = cursor.execute(query, (identifier,)).fetchone()
-            if result:
-                return result[0]
-            try:
-                query_v6 = (
-                    f"SELECT {P_COL_UID} FROM {PROFILE_TABLE} WHERE {P_COL_QQ} = ?"
-                )
-                result = cursor.execute(query_v6, (identifier,)).fetchone()
-                if result:
-                    return result[0]
-            except sqlite3.OperationalError:
-                pass
-            return None
-        except sqlite3.Error as e:
-            print(f"通过QQ号查询UID时出错: {e}")
-            return None
-        finally:
-            if "conn" in locals() and conn:
-                conn.close()
-
-    def set_my_uid(self, uid):
-        self.my_uid = uid
-        if uid not in self.friends and self.is_enabled:
-            try:
-                conn = sqlite3.connect(PROFILE_DB_FILE)
-                query = f"SELECT {P_COL_UID}, {P_COL_QQ}, {P_COL_NAME}, {P_COL_REMARK} FROM {PROFILE_TABLE} WHERE {P_COL_UID} = ?"
-                my_info = conn.cursor().execute(query, (uid,)).fetchone()
-                if my_info:
-                    self.friends[my_info[0]] = {
-                        "qq": my_info[1],
-                        "name": my_info[2],
-                        "remark": my_info[3],
-                    }
-            finally:
-                if "conn" in locals() and conn:
-                    conn.close()
-
-    def get_display_info(self, uid, format_str):
-        if not self.is_enabled or not self.my_uid or not uid:
-            return uid or "未知用户"
-
-        if uid == self.my_uid:
-            defaults = {"name": "我", "qq": "我的QQ"}
-        else:
-            defaults = {"name": f"未知用户({uid[-4:]})", "qq": "未知QQ"}
-
-        info = self.friends.get(uid, {})
-        name = info.get("name", defaults["name"])
-        remark = info.get("remark")
-        qq = info.get("qq", defaults["qq"])
-        remark_or_name = remark or name
-
-        return format_str.format(
-            name=name,
-            qq=qq,
-            uid=uid,
-            remark=remark or "",
-            remark_or_name=remark_or_name,
-        )
-
-    def get_filename_part(self, uid):
-        if not self.is_enabled:
-            return uid
-        info = self.friends.get(uid, {"qq": uid, "name": "Unknown", "remark": None})
-        qq, name, remark = (
-            info.get("qq", uid),
-            info.get("name", "Unknown"),
-            info.get("remark"),
-        )
-        return f"{qq}-{name}(备注-{remark})" if remark else f"{qq}-{name}"
-
-
-def get_text_from_raw(raw_message, profile_manager, display_format):
-    if not raw_message:
-        return ""
-    try:
-        messages, typedef = blackboxprotobuf.decode_message(raw_message)
-        single_messages = messages.get(PB_FIELD_MSG_CONTAINER, [])
-        if not isinstance(single_messages, list):
-            single_messages = [single_messages]
-
-        text_parts = []
-        for msg in single_messages:
-            if not isinstance(msg, dict):
-                continue
-
-            def extract_text(sub_message):
-                if not isinstance(sub_message, dict):
-                    return
-
-                if PB_FIELD_REPLY in sub_message:
-                    original_sender_uid = sub_message.get("40020", b"").decode(
-                        "utf-8", "ignore"
-                    )
-                    original_timestamp = sub_message.get("47404")
-
-                    nested_reply_obj = sub_message[PB_FIELD_REPLY]
-                    original_text = ""
-                    if isinstance(nested_reply_obj, dict):
-                        original_text = nested_reply_obj.get(PB_FIELD_TEXT, b"").decode(
-                            "utf-8", "ignore"
-                        )
-
-                    if not original_text:
-                        original_text = sub_message.get("47413", b"").decode(
-                            "utf-8", "ignore"
-                        )
-
-                    original_sender_info = "未知用户"
-                    if profile_manager and original_sender_uid:
-                        original_sender_info = profile_manager.get_display_info(
-                            original_sender_uid, display_format
-                        )
-
-                    time_str = "未知时间"
-                    if original_timestamp:
-                        time_str = datetime.fromtimestamp(original_timestamp).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-
-                    text_parts.append(
-                        f"\n    [回复-> [{time_str}] {original_sender_info}: {original_text} <-]"
-                    )
-
-                elif PB_FIELD_TEXT in sub_message:
-                    text_parts.append(
-                        sub_message[PB_FIELD_TEXT].decode("utf-8", errors="ignore")
-                    )
-
-                elif sub_message.get("45002") == 8 and "48214" in sub_message:
-                    xml_text = sub_message.get("48214", b"").decode("utf-8", "ignore")
-                    clean_text = re.sub(r"<[^>]+>", "", xml_text).strip()
-                    text_parts.append(clean_text)
-
-            extract_text(msg)
-
-        return "".join(text_parts)
-    except Exception:
-        return ""
-
-
-def get_user_config(profile_manager):
-    """获取用户输入，确定导出模式和参数。"""
-    print("\n" + "=" * 42)
-    print("==      QQ 聊天记录导出工具       ==")
-    print("=" * 42)
-    while True:
-        print("\n请选择导出模式:")
-        print("  1. 全部导出 (按全局时间线排序)")
-        print("  2. 全部导出 (按好友分类保存)")
-        print("  3. 导出指定好友")
-        mode = input("请输入模式编号 (1/2/3): ")
-        if mode in ["1", "2", "3"]:
-            break
-        print("输入无效。")
-
-    target_uid = None
-    if mode == "3":
-        if profile_manager.is_enabled:
-            print("\n好友列表:")
-            friend_list = sorted(
-                profile_manager.friends.items(),
-                key=lambda item: (
-                    item[1].get("remark") or item[1].get("name") or "zzzz"
-                ).lower(),
+    def get_display_name(self, uid, style, custom_format=""):
+        """根据用户选择的风格，获取一个UID对应的显示名称。"""
+        user = self.user_info.get(uid)
+        if not user: return uid
+        qq, nickname, remark = user.get('qq', uid), user.get('nickname', ''), user.get('remark', '')
+        default_name = remark or nickname or qq
+        
+        if style == 'default': return default_name
+        if style == 'nickname': return nickname or qq
+        if style == 'qq': return qq
+        if style == 'uid': return uid
+        if style == 'custom':
+            return custom_format.format(
+                nickname=nickname or "N/A", remark=remark or "N/A", qq=qq, uid=uid
             )
-            for i, (uid, info) in enumerate(friend_list):
-                name, remark, qq = info.get("name"), info.get("remark"), info.get("qq")
-                display_str = (
-                    f"{remark} (昵称: {name}) (QQ: {qq})"
-                    if remark
-                    else f"{name} (QQ: {qq})"
-                )
-                print(f"  {i+1}: {display_str}")
-            while True:
-                try:
-                    choice = int(input("请输入您想导出的好友的序号: "))
-                    if 1 <= choice <= len(friend_list):
-                        target_uid = friend_list[choice - 1][0]
-                        break
-                    else:
-                        print("序号超出范围。")
-                except ValueError:
-                    print("请输入数字序号。")
-        else:
-            target_uid = input("请输入您想导出的好友的UID: ").strip()
+        return default_name
 
-    print("\n是否筛选时间范围? (不需要请直接按回车)")
-    start_date_str = input("请输入开始日期 (格式YYYY-MM-DD): ").strip()
-    end_date_str = input("请输入结束日期 (格式YYYY-MM-DD): ").strip()
-    start_ts, end_ts = None, None
+    def get_filename(self, uid, timestamp_str):
+        """为一对一聊天记录生成标准的文件名，并附加时间戳。"""
+        user = self.user_info.get(uid)
+        if not user: return f"{uid}{timestamp_str}.txt"
+        
+        qq, nickname, remark = user.get('qq', uid), user.get('nickname', ''), user.get('remark', '')
+        
+        name_part = nickname or qq
+        remark_part = f"(备注-{remark})" if remark else ""
+        safe_name_part = re.sub(r'[\\/*?:"<>|]', "", name_part)
+        safe_remark_part = re.sub(r'[\\/*?:"<>|]', "", remark_part)
+        
+        return f"{qq}_{safe_name_part}{safe_remark_part}{timestamp_str}.txt"
+
+# --- 时间处理函数 ---
+def _parse_time_string(input_str: str) -> dict or None:
+    """
+    极度人性化地解析各种日期时间格式。
+    返回一个包含年月日时分秒的字典，未提供则为None。
+    """
+    if not input_str: return None
+    s = input_str.strip()
+    s = re.sub(r'[/.年月]', '-', s)
+    s = re.sub(r'[时分]', ':', s)
+    s = re.sub(r'[日秒]', '', s)
+    s = s.strip()
+    match = re.match(
+        r'(?:(\d{4}|\d{2})-)?(\d{1,2})-(\d{1,2})'
+        r'(?:\s+(\d{1,2})' r'(?::(\d{1,2})' r'(?::(\d{1,2})' r')?)?)?', s)
+    if not match: return None
+    year, month, day, hour, minute, second = match.groups()
+    now = datetime.now()
+    if year:
+        if len(year) == 2: year = f"20{year}"
+    else: year = str(now.year)
     try:
-        if start_date_str:
-            start_ts = int(datetime.strptime(start_date_str, "%Y-%m-%d").timestamp())
-        if end_date_str:
-            end_ts = int(
-                datetime.strptime(
-                    end_date_str + " 23:59:59", "%Y-%m-%d %H:%M:%S"
-                ).timestamp()
-            )
-    except ValueError:
-        print("提示: 日期格式错误，将不进行时间筛选。")
-        start_ts, end_ts = None, None
-
-    display_format = "{name}"
-    if profile_manager.is_enabled:
-        print("\n请选择用户标识显示格式:")
-        print("  1. 昵称 (默认)")
-        print("  2. 昵称/备注 (优先显示备注)")
-        print("  3. QQ号码")
-        print("  4. UID")
-        print("  5. 自定义格式")
-        format_choice = input("请输入格式编号 (1-5，默认1): ").strip()
-
-        format_map = {"1": "{name}", "2": "{remark_or_name}", "3": "{qq}", "4": "{uid}"}
-
-        if format_choice == "5":
-            print("可用占位符: {name}, {remark}, {remark_or_name}, {qq}, {uid}")
-            display_format = input("请输入自定义格式: ").strip() or "{name}"
-        else:
-            display_format = format_map.get(format_choice, "{name}")
-
+        datetime(int(year), int(month), int(day))
+    except ValueError: return None
     return {
-        "mode": mode,
-        "target_uid": target_uid,
-        "start_ts": start_ts,
-        "end_ts": end_ts,
-        "format": display_format,
+        'year': int(year), 'month': int(month), 'day': int(day),
+        'hour': int(hour) if hour is not None else None,
+        'minute': int(minute) if minute is not None else None,
+        'second': int(second) if second is not None else None
     }
 
+def get_time_range():
+    """
+    【交互功能】提示用户输入时间范围，并返回处理后的起始和结束时间戳。
+    """
+    print("\n--- 请设定时间范围 (可选) ---")
+    print("格式:YYYY-MM-DD HH:MM:SS (年可选, 符号可为-/.或年月日)")
+    print("留空则导出全部。只输入日期则包含全天。")
+    start_ts, end_ts = None, None
+    while True:
+        start_str = input("请输入开始时间 (例如 6-23 或 2025-06-23 08:30): ").strip()
+        if not start_str: break
+        parts = _parse_time_string(start_str)
+        if not parts:
+            print("  -> 格式无法识别，请重新输入或直接回车跳过。")
+            continue
+        h = parts['hour'] if parts['hour'] is not None else 0
+        m = parts['minute'] if parts['minute'] is not None else 0
+        s = parts['second'] if parts['second'] is not None else 0
+        try:
+            start_dt = datetime(parts['year'], parts['month'], parts['day'], h, m, s)
+            start_ts = int(start_dt.timestamp())
+            print(f"  -> 开始时间设定为: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            break
+        except ValueError: print("  -> 时间值无效 (例如 小时为25)，请重新输入。")
+    while True:
+        end_str = input("请输入结束时间 (例如 6-23 或 2025-06-23 18:00): ").strip()
+        if not end_str: break
+        parts = _parse_time_string(end_str)
+        if not parts:
+            print("  -> 格式无法识别，请重新输入或直接回车跳过。")
+            continue
+        h_part, m_part, s_part = parts['hour'], parts['minute'], parts['second']
+        if h_part is None: h, m, s = 23, 59, 59
+        else:
+            h = h_part
+            m = m_part if m_part is not None else 0
+            s = s_part if s_part is not None else 0
+        try:
+            end_dt = datetime(parts['year'], parts['month'], parts['day'], h, m, s)
+            if start_ts and end_dt.timestamp() < start_ts:
+                print("  -> 错误: 结束时间不能早于开始时间，请重新输入。")
+                continue
+            end_ts = int(end_dt.timestamp())
+            print(f"  -> 结束时间设定为: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            break
+        except ValueError: print("  -> 时间值无效 (例如 小时为25)，请重新输入。")
+    return start_ts, end_ts
 
-def fetch_data(config):
-    """根据配置从数据库查询数据。"""
+# --- 核心消息解析函数 ---
+def get_placeholder(value, placeholder="N/A"):
+    """处理空值或"0"，返回占位符"""
+    return value if value and str(value) != "0" else placeholder
+
+def format_timestamp(ts):
+    """将时间戳格式化为易读的日期时间字符串"""
+    if isinstance(ts, int) and ts > 0:
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError): return f"时间戳({ts})"
+    return "N/A"
+
+def _extract_readable_text(data: bytes) -> str or None:
+    """
+    【核心抢救逻辑】当标准Protobuf解码失败时，调用此函数尝试从原始字节流中强行提取可读的文本片段。
+    """
+    if not data: return None
     try:
-        conn = sqlite3.connect(C2C_DB_FILE)
-        cursor = conn.cursor()
-        print(f"\n聊天记录库 '{C2C_DB_FILE}' 打开成功。")
-        params = []
-        query = f"SELECT * FROM {C2C_TABLE} WHERE {C2C_COL_SENDER_UID} IS NOT NULL AND {C2C_COL_PEER_UID} IS NOT NULL AND {C2C_COL_MSG_TIME} IS NOT NULL"
-        if config["target_uid"]:
-            query += f" AND ({C2C_COL_SENDER_UID} = ? OR {C2C_COL_PEER_UID} = ?)"
-            params.extend([config["target_uid"], config["target_uid"]])
-        if config["start_ts"]:
-            query += f" AND {C2C_COL_MSG_TIME} >= ?"
-            params.append(config["start_ts"])
-        if config["end_ts"]:
-            query += f" AND {C2C_COL_MSG_TIME} <= ?"
-            params.append(config["end_ts"])
-        query += f" ORDER BY {C2C_COL_MSG_TIME} ASC;"
-        print("正在查询和加载聊天记录...")
-        cursor.execute(query, tuple(params))
-        all_rows = cursor.fetchall()
-        print(f"查询完成，找到 {len(all_rows)} 条相关记录。")
-        return all_rows
-    except sqlite3.Error as e:
-        print(f"数据库错误: {e}")
+        decoded_str = data.decode("utf-8", errors="replace")
+        pattern = r"[a-zA-Z0-9\u4e00-\u9fa5\s.,!?;:\'\"()\[\]{}_\-+=*/\\|<>@#$%^&~]+"
+        fragments = re.findall(pattern, decoded_str)
+        return max(fragments, key=len).strip() if fragments else None
+    except Exception: return None
+
+def _parse_single_segment(segment: dict) -> str:
+    """内部辅助函数，为引用消息提供原文的文本摘要，或为其他消息提供基础解析。"""
+    if not isinstance(segment, dict): return ""
+    msg_type = segment.get(PB_MSG_TYPE)
+    if msg_type == 2:
+        if segment.get(PB_MSG_SUBTYPE) == 1: return "[动画表情]"
+        if segment.get(PB_IMAGE_IS_FLASH) == 1: return "[闪照]"
+        return "[图片]"
+    if msg_type == 4:
+        duration = segment.get(PB_VOICE_DURATION)
+        return f'[语音] {duration}"' if isinstance(duration, int) and duration > 0 else "[语音]"
+    if msg_type == 9:
+        title = segment.get("48403", {}).get(PB_REDPACKET_TITLE, b"").decode("utf-8", "ignore")
+        return f"[口令红包] {title}" if segment.get(PB_REDPACKET_TYPE) == 6 else f"[红包] {title}"
+    if msg_type == 11 and PB_MARKET_FACE_TEXT in segment:
+        return segment[PB_MARKET_FACE_TEXT].decode("utf-8", "ignore")
+    if PB_TEXT_CONTENT in segment:
+        return segment.get(PB_TEXT_CONTENT, b"").decode("utf-8", "ignore")
+    if msg_type == 5: return "[视频]"
+    return f"[{MSG_TYPE_MAP.get(msg_type, '消息')}]"
+
+def _decode_interactive_gray_tip(segment: dict, profile_mgr, name_style, name_format) -> dict or None:
+    """解析互动式灰字提示（如戳一戳、拍一拍），返回结构化字典用于后续特殊格式化。"""
+    try:
+        xml = segment.get(PB_GRAYTIP_INTERACTIVE_XML, b"").decode("utf-8", "ignore")
+        uids = re.findall(r'<qq uin="([^"]+)"', xml)
+        texts = re.findall(r'<nor txt="([^"]*)"', xml)
+        if len(uids) >= 2 and len(texts) >= 1:
+            actor = profile_mgr.get_display_name(uids[0], name_style, name_format)
+            target = profile_mgr.get_display_name(uids[1], name_style, name_format)
+            return {"type": "interactive_tip", "actor": actor, "target": target,
+                    "verb": texts[0] or "戳了戳", "suffix": texts[1] if len(texts) > 1 else ""}
+    except Exception: return None
+
+def decode_gray_tip(segment: dict, profile_mgr, name_style, name_format) -> dict or str or None:
+    """
+    【白名单逻辑】解析灰字提示，只保留互动提示（戳一戳）和撤回消息，过滤掉所有其他系统提示。
+    """
+    interactive = _decode_interactive_gray_tip(segment, profile_mgr, name_style, name_format)
+    if interactive:
+        return interactive
+    
+    if PB_RECALLER_UID in segment:
+        recaller_uid_raw = segment.get(PB_RECALLER_UID)
+        recaller_uid = ""
+        if isinstance(recaller_uid_raw, bytes):
+            recaller_uid = recaller_uid_raw.decode('utf-8', 'ignore')
+        elif isinstance(recaller_uid_raw, str):
+            recaller_uid = recaller_uid_raw
+
+        display_name = profile_mgr.get_display_name(recaller_uid, name_style, name_format)
+        
+        if display_name == recaller_uid:
+            fallback_name_raw = segment.get(PB_RECALLER_NAME)
+            if isinstance(fallback_name_raw, bytes):
+                display_name = fallback_name_raw.decode('utf-8', 'ignore') or recaller_uid
+            elif isinstance(fallback_name_raw, str):
+                display_name = fallback_name_raw or recaller_uid
+
+        recall_suffix_raw = segment.get(PB_RECALL_SUFFIX)
+        recall_suffix = ""
+        if isinstance(recall_suffix_raw, bytes):
+            recall_suffix = recall_suffix_raw.decode('utf-8', 'ignore')
+        elif isinstance(recall_suffix_raw, str):
+            recall_suffix = recall_suffix_raw
+
+        message = f"[{display_name} 撤回了一条消息"
+        if recall_suffix:
+            message += f" {recall_suffix}"
+        message += "]"
+        return message
+
+    return None
+
+def decode_ark_message(segment: dict) -> str or None:
+    """解析并过滤Ark卡片消息，只保留需要的类型。"""
+    try:
+        json_str = segment.get(PB_ARK_JSON)
+        if not json_str: return None
+        data = json.loads(json_str.decode("utf-8", "ignore") if isinstance(json_str, bytes) else json_str)
+        app, prompt = data.get("app"), data.get("prompt", "")
+        if app == "com.tencent.contact.lua" and "推荐联系人" in prompt: return f"[名片] {prompt}"
+        if app == "com.tencent.miniapp_01" and "[QQ小程序]" in prompt: return prompt
+        if app == "com.tencent.multimsg":
+            source = data.get("meta", {}).get("detail", {}).get("source", "未知")
+            summary = data.get("meta", {}).get("detail", {}).get("summary", "查看转发")
+            return f"[聊天记录] {source}: {summary}"
         return None
-    finally:
-        if "conn" in locals() and conn:
-            conn.close()
+    except Exception: return "[卡片-解析失败]"
+
+def decode_message_content(content, timestamp, profile_mgr, name_style, name_format, is_timeline=False) -> list or None:
+    """
+    【核心消息解析函数】负责将原始字节流解码为可读的消息部分列表。
+    :param is_timeline: 标志位，用于决定引用消息的格式。
+    """
+    if not content: return None
+    try:
+        decoded, _ = blackboxprotobuf.decode_message(content)
+        segments_data = decoded.get(PB_MSG_CONTAINER)
+        if segments_data is None: return ["[结构错误: 未找到消息容器]"]
+        segments = segments_data if isinstance(segments_data, list) else [segments_data]
+        parts = []
+        for seg in segments:
+            if not isinstance(seg, dict): continue
+            msg_type = seg.get(PB_MSG_TYPE)
+            part = None
+            if msg_type not in MSG_TYPE_MAP: continue
+            
+            if msg_type == 1: part = seg.get(PB_TEXT_CONTENT, b"").decode("utf-8", "ignore")
+            elif msg_type == 7:
+                ts = seg.get(PB_REPLY_ORIGIN_TS)
+                if ts in SALVAGE_CACHE: origin_content = SALVAGE_CACHE[ts]
+                else:
+                    origin_content = seg.get(PB_REPLY_ORIGIN_SUMMARY_TEXT, b"").decode("utf-8", "ignore")
+                    if not origin_content:
+                        obj = seg.get(PB_REPLY_ORIGIN_OBJ)
+                        origin_content = _parse_single_segment(obj) if obj else ""
+                
+                s_uid = seg.get(PB_REPLY_ORIGIN_SENDER_UID, b"").decode("utf-8")
+                sender = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
+
+                if is_timeline:
+                    r_uid = seg.get(PB_REPLY_ORIGIN_RECEIVER_UID, b"").decode("utf-8")
+                    receiver = profile_mgr.get_display_name(get_placeholder(r_uid), name_style, name_format)
+                    part = f"[引用-> [{format_timestamp(ts)}] {sender} -> {receiver}: {origin_content} <-]"
+                else:
+                    part = f"[引用-> [{format_timestamp(ts)}] {sender}: {origin_content} <-]"
+            elif msg_type == 21:
+                status = seg.get(PB_CALL_STATUS, b"").decode("utf-8", "ignore")
+                call_type = "语音通话" if seg.get(PB_CALL_TYPE) == 1 else "视频通话" if seg.get(PB_CALL_TYPE) == 2 else "通话"
+                part = f"[{call_type}] {status}"
+            elif msg_type == 4:
+                text = seg.get(PB_VOICE_TO_TEXT, b"").decode("utf-8", "ignore")
+                part = f"[语音] 转文字：{text}" if text else _parse_single_segment(seg)
+            elif msg_type == 8: part = decode_gray_tip(seg, profile_mgr, name_style, name_format)
+            elif msg_type == 10: part = decode_ark_message(seg)
+            else: part = _parse_single_segment(seg)
+            if part: parts.append(part)
+        return parts or None
+    except Exception:
+        salvaged = None
+        try:
+            match = re.search(r"(\[[^\]]{1,10}\])", content.decode("utf-8", "ignore"))
+            if match: salvaged = match.group(1)
+        except Exception: pass
+        if not salvaged: salvaged = _extract_readable_text(content)
+        if salvaged:
+            SALVAGE_CACHE[timestamp] = salvaged
+            return [salvaged]
+        b64 = f"[解码失败-BASE64] {base64.b64encode(content).decode('ascii')}"
+        SALVAGE_CACHE[timestamp] = b64
+        return [b64]
+
+# --- 用户交互与选择 ---
+def select_export_mode():
+    """让用户选择主导出模式。"""
+    print("\n--- 请选择导出模式 ---")
+    options = ["全局时间线", "导出全部好友", "按分组导出", "指定好友导出", "导出用户信息列表"]
+    for i, opt in enumerate(options): print(f"  {i+1}. {opt}")
+    while True:
+        choice = input(f"请输入选项序号 (1-{len(options)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(options): return int(choice)
+        print("  -> 无效输入，请重试。")
+
+def select_user_list_mode():
+    """让用户选择导出用户列表的范围。"""
+    print("\n--- 请选择要导出的用户范围 ---")
+    options = ["仅好友", "全部缓存用户"]
+    for i, opt in enumerate(options): print(f"  {i+1}. {opt}")
+    while True:
+        choice = input(f"请输入选项序号 (1-{len(options)}): ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(options): return int(choice)
+        print("  -> 无效输入，请重试。")
+
+def select_name_style():
+    """让用户选择导出的名称显示格式，并支持回车使用默认值。"""
+    print("\n--- 请选择用户标识显示格式 ---")
+    styles = {'1': 'default', '2': 'nickname', '3': 'qq', '4': 'uid', '5': 'custom'}
+    descs = {'1': "备注/昵称 (优先显示备注) [默认]", '2': "昵称", '3': "QQ号码", '4': "UID", '5': "自定义格式"}
+    for k, v in descs.items(): print(f"  {k}. {v}")
+    
+    while True:
+        choice = input(f"请输入选项序号 (1-5, 直接回车使用默认值): ").strip()
+        
+        if not choice:
+            choice = '1'
+            
+        if choice in styles:
+            style = styles[choice]
+            custom_fmt = ""
+            if style == 'custom':
+                print("可用占位符: {nickname}, {remark}, {qq}, {uid}")
+                custom_fmt = input("请输入自定义格式: ").strip()
+            return style, custom_fmt
+        print("  -> 无效输入，请重试。")
+
+def select_friends(profile_mgr: ProfileManager):
+    """
+    【交互功能】提供一个可交互的菜单让用户选择一个或多个好友。
+    支持按分组查看或全部展开，全部展开时会保留分组标题。
+    """
+    friends_by_group = {}
+    for uid, info in profile_mgr.user_info.items():
+        if uid == profile_mgr.my_uid: continue
+        gid = info['group_id']
+        if gid not in friends_by_group: friends_by_group[gid] = []
+        friends_by_group[gid].append(uid)
+    
+    while True:
+        print("\n--- 请选择要导出的好友 ---")
+        sorted_groups = sorted(friends_by_group.items(), key=lambda i: profile_mgr.group_info.get(i[0], str(i[0])))
+        choices = {str(i+1): gid for i, (gid, uids) in enumerate(sorted_groups)}
+        for i, (gid, uids) in enumerate(sorted_groups):
+            name = profile_mgr.group_info.get(gid, f"分组_{gid}")
+            print(f"  {i+1}. {name} ({len(uids)}人)")
+        print("  a. 全部展开")
+        choice = input("请选择分组序号或'a'查看好友: ").strip().lower()
+        
+        gids_to_show = []
+        if choice == 'a':
+            gids_to_show = [gid for gid, uids in sorted_groups]
+        elif choice in choices:
+            gids_to_show.append(choices[choice])
+        else:
+            print("  -> 无效输入。")
+            continue
+
+        print("\n--- 请选择好友 (可多选，用空格或逗号分隔) ---")
+        selectable = {}
+        i = 1
+        for gid in gids_to_show:
+            if choice == 'a':
+                group_name = profile_mgr.group_info.get(gid, f"分组_{gid}")
+                print(f"\n--- {group_name} ---")
+            
+            if not friends_by_group.get(gid):
+                print("  (此分组下没有好友)")
+                continue
+            
+            for uid in friends_by_group[gid]:
+                info = profile_mgr.user_info[uid]
+                remark = f" (备注: {info['remark']})" if info['remark'] else ""
+                display = f"{info['nickname'] or info['qq']}{remark} (QQ: {info['qq']})"
+                print(f"  {i}. {display}")
+                selectable[str(i)] = uid
+                i += 1
+        
+        if not selectable:
+            print("没有可供选择的好友。")
+            continue
+            
+        choices_str = input("请输入好友序号: ").strip()
+        selected = [selectable[c] for c in re.split(r'[\s,]+', choices_str) if c in selectable]
+        if selected: return list(set(selected))
+        print("  -> 未选择任何好友。")
 
 
-def sanitize_filename(name):
-    """清理文件名中的非法字符。"""
-    return re.sub(r'[\\/*?:"<>|]', "_", name)
+def select_group(profile_mgr: ProfileManager):
+    """让用户从分组列表中选择一个分组。"""
+    print("\n--- 请选择要导出的分组 ---")
+    friends_by_group = {info.get('group_id'): [] for uid, info in profile_mgr.user_info.items() if uid != profile_mgr.my_uid}
+    for uid, info in profile_mgr.user_info.items():
+        if uid != profile_mgr.my_uid: friends_by_group[info.get('group_id')].append(uid)
+    
+    sorted_groups = sorted(profile_mgr.group_info.items(), key=lambda i: i[1])
+    choices = {str(i+1): gid for i, (gid, name) in enumerate(sorted_groups)}
+    for i, (gid, name) in enumerate(sorted_groups):
+        count = len(friends_by_group.get(gid, []))
+        print(f"  {i+1}. {name} ({count}人)")
+    while True:
+        choice = input(f"请输入分组序号 (1-{len(choices)}): ").strip()
+        if choice in choices: return choices[choice]
+        print("  -> 无效输入，请重试。")
 
+# --- 导出执行逻辑 ---
+def process_and_write(output_path, rows, profile_mgr, name_style, name_format, is_timeline=False):
+    """将查询到的数据库行处理并写入文件。"""
+    count = 0
+    with open(output_path, "w", encoding="utf-8") as f:
+        for row in rows:
+            ts, s_uid, p_uid, content = row
+            parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, is_timeline)
+            if not parts: continue
+            
+            text = " ".join(str(p) for p in parts if not isinstance(p, dict))
+            if text == "[系统提示]": continue
+            
+            time = format_timestamp(ts)
+            first = parts[0]
+            if isinstance(first, dict) and first.get("type") == "interactive_tip":
+                body = f"{first['actor']} {first['verb']} {first['target']}{first['suffix']}"
+                line = f"[{time}] [系统提示]: {body}\n"
+            else:
+                sender = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
+                if sender == "N/A": sender = "[系统提示]"
+                if is_timeline:
+                    if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
+                    receiver = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
+                    line = f"[{time}] {sender} -> {receiver}: {text}\n"
+                else: line = f"[{time}] {sender}: {text}\n"
+            f.write(line)
+            count += 1
+    return count
 
-def _write_single_conversation(filename, records, profile_manager, display_format):
-    """将单组对话记录写入指定文件。"""
-    with open(filename, "w", encoding="utf-8") as f:
-        for r in records:
-            sender_str = profile_manager.get_display_info(r["sender"], display_format)
-            time_str = datetime.fromtimestamp(r["time"]).strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f'[{time_str}] {sender_str}: {r["text"]}\n')
-
-
-def process_and_write(rows, config, profile_manager):
-    """处理数据并根据模式写入文件。"""
+def export_timeline(db_con, config):
+    """执行全局时间线导出。"""
+    print("\n正在执行“全局时间线”导出...")
+    start_ts, end_ts, name_style, name_format, profile_mgr, run_timestamp = config.values()
+    query = f"SELECT `{COL_TIMESTAMP}`, `{COL_SENDER_UID}`, `{COL_PEER_UID}`, `{COL_MSG_CONTENT}` FROM {TABLE_NAME}"
+    clauses, params = [], []
+    if start_ts:
+        clauses.append(f"`{COL_TIMESTAMP}` >= ?")
+        params.append(start_ts)
+    if end_ts:
+        clauses.append(f"`{COL_TIMESTAMP}` <= ?")
+        params.append(end_ts)
+    if clauses: query += f" WHERE {' AND '.join(clauses)}"
+    query += f" ORDER BY `{COL_TIMESTAMP}` ASC"
+    
+    cur = db_con.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
     if not rows:
-        print("没有可导出的记录。")
+        print("查询完成，但未能获取任何记录。")
+        return
+        
+    filename = f"{TIMELINE_FILENAME_BASE}{run_timestamp}.txt"
+    path = os.path.join(OUTPUT_DIR, filename)
+    count = process_and_write(path, rows, profile_mgr, name_style, name_format, True)
+    print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
+
+def export_one_on_one(db_con, friend_uid, config, out_dir=None, index=None, total=None):
+    """导出一个好友的一对一聊天记录。"""
+    start_ts, end_ts, name_style, name_format, profile_mgr, run_timestamp = config.values()
+    
+    friend_info = profile_mgr.user_info.get(friend_uid, {})
+    friend_nickname = friend_info.get('nickname', friend_uid)
+    friend_remark = friend_info.get('remark', '')
+    friend_display_name = f"{friend_nickname or friend_uid}{f'(备注-{friend_remark})' if friend_remark else ''}"
+    
+    if index and total:
+        print(f"正在导出 ({index}/{total}) {friend_display_name}... ", end="")
+    else:
+        print(f"\n正在导出与 {friend_display_name} 的聊天记录...")
+    
+    query = f"SELECT `{COL_TIMESTAMP}`, `{COL_SENDER_UID}`, `{COL_PEER_UID}`, `{COL_MSG_CONTENT}` FROM {TABLE_NAME}"
+    clauses = [f"`{COL_PEER_UID}` = ?"]
+    params = [friend_uid]
+
+    if start_ts:
+        clauses.append(f"`{COL_TIMESTAMP}` >= ?")
+        params.append(start_ts)
+    if end_ts:
+        clauses.append(f"`{COL_TIMESTAMP}` <= ?")
+        params.append(end_ts)
+    query += f" WHERE {' AND '.join(clauses)} ORDER BY `{COL_TIMESTAMP}` ASC"
+    
+    cur = db_con.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    if not rows:
+        print(f"-> 与 {friend_display_name} 在指定时间内无聊天记录。")
         return
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    my_uid, fmt = profile_manager.my_uid, config["format"]
+    output_dir = out_dir or OUTPUT_DIR
+    os.makedirs(output_dir, exist_ok=True)
+    filename = profile_mgr.get_filename(friend_uid, run_timestamp)
+    path = os.path.join(output_dir, filename)
+    count = process_and_write(path, rows, profile_mgr, name_style, name_format, False)
+    print(f"-> 共导出 {count} 条消息到 {path}")
 
-    print("正在解析消息内容...")
-    processed_records = []
-    for row in rows:
-        full_message = get_text_from_raw(row[17], profile_manager, fmt)
-        if full_message.strip():
-            processed_records.append(
-                {
-                    "sender": row[7],
-                    "peer": row[9],
-                    "time": row[13],
-                    "text": full_message,
-                }
-            )
+def export_user_list(profile_mgr, list_mode, timestamp_str):
+    """
+    【新增功能】导出用户信息列表到txt文件。
+    :param list_mode: 1 for 仅好友, 2 for 全部缓存用户
+    """
+    if list_mode == 1:
+        print("\n正在导出好友列表...")
+        users_to_export = profile_mgr.user_info
+        base_filename = FRIENDS_LIST_FILENAME
+    else: # list_mode == 2
+        print("\n正在导出全部缓存用户列表...")
+        users_to_export = profile_mgr.all_profiles_cache
+        base_filename = ALL_USERS_LIST_FILENAME
 
-    print(f"解析完成，共 {len(processed_records)} 条有效消息。")
-    if not processed_records:
-        return
-
-    if config["mode"] == "1":
-        filename = os.path.join(OUTPUT_DIR, "chat_logs_timeline.txt")
-        print(f"开始写入文件 '{filename}'...")
-        with open(filename, "w", encoding="utf-8") as f:
-            for r in processed_records:
-                sender_str = profile_manager.get_display_info(r["sender"], fmt)
-                time_str = datetime.fromtimestamp(r["time"]).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                f.write(f'[{time_str}] {sender_str}: {r["text"]}\n')
-        print(f"导出完成。")
-
-    elif config["mode"] == "2":
-        output_dir_by_friend = os.path.join(OUTPUT_DIR, "chat_logs_by_friend")
-        os.makedirs(output_dir_by_friend, exist_ok=True)
-        print(f"开始分类写入文件夹 '{output_dir_by_friend}'...")
-        conversations = {}
-        for r in processed_records:
-            friend_uid = r["peer"] if r["sender"] == my_uid else r["sender"]
-            if friend_uid not in conversations:
-                conversations[friend_uid] = []
-            conversations[friend_uid].append(r)
-
-        for friend_uid, records in conversations.items():
-            filename_part = profile_manager.get_filename_part(friend_uid)
-            filename = os.path.join(
-                output_dir_by_friend, f"聊天记录-{sanitize_filename(filename_part)}.txt"
-            )
-            _write_single_conversation(filename, records, profile_manager, fmt)
-        print(f"导出完成，共为 {len(conversations)} 位好友生成了文件。")
-
-    elif config["mode"] == "3":
-        filename_part = profile_manager.get_filename_part(config["target_uid"])
-        filename = os.path.join(
-            OUTPUT_DIR, f"聊天记录-{sanitize_filename(filename_part)}.txt"
-        )
-        print(f'开始写入文件 "{filename}"...')
-        _write_single_conversation(filename, processed_records, profile_manager, fmt)
-        print("导出完成。")
-
+    name, ext = os.path.splitext(base_filename)
+    filename = f"{name}{timestamp_str}{ext}"
+    output_path = os.path.join(OUTPUT_DIR, filename)
+    
+    count = 0
+    with open(output_path, "w", encoding="utf-8") as f:
+        for uid, info in users_to_export.items():
+            if uid == profile_mgr.my_uid: continue # 不导出自己
+            
+            f.write("----------------------------------------\n")
+            f.write(f"昵称: {info.get('nickname', 'N/A')}\n")
+            f.write(f"备注: {info.get('remark', 'N/A')}\n")
+            f.write(f"QQ: {info.get('qq', 'N/A')}\n")
+            f.write(f"UID: {uid}\n")
+            f.write(f"QID: {info.get('qid', 'N/A')}\n")
+            f.write(f"签名: {info.get('signature', 'N/A')}\n")
+            count += 1
+    
+    print(f"\n处理完成！共导出 {count} 位用户的信息到 {output_path}")
 
 def main():
-    """主函数。"""
-    profile_manager = ProfileManager(PROFILE_DB_FILE)
-    config = get_user_config(profile_manager)
+    """主执行函数，负责整个程序的流程控制。"""
+    print("--- QQ聊天记录导出工具 ---")
+    
+    # 1. 初始化，加载所有用户信息
+    profile_mgr = ProfileManager(PROFILE_DB_FILENAME)
+    profile_mgr.load_data()
+    
+    # 2. 让用户选择主模式
+    mode = select_export_mode()
+    
+    # 3. 统一创建主输出目录和生成本次运行的时间戳
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    run_timestamp = f"_{int(datetime.now().timestamp())}"
+    
+    # 4. 根据模式执行不同操作
+    if mode == 5: # 导出用户信息列表
+        list_mode = select_user_list_mode()
+        export_user_list(profile_mgr, list_mode, run_timestamp)
+    else: # 导出聊天记录
+        targets = []
+        output_dir = None
+        
+        if mode == 1: # 全局时间线
+            pass 
+        elif mode == 2: # 导出全部好友
+            output_dir = os.path.join(OUTPUT_DIR, "friends")
+            targets = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
+        elif mode == 3: # 按分组
+            gid = select_group(profile_mgr)
+            name = profile_mgr.group_info.get(gid, f"分组{gid}")
+            safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid}_{name}")
+            output_dir = os.path.join(OUTPUT_DIR, "friends", safe_name)
+            targets = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid]
+            if not targets: print("该分组下没有好友。")
+        elif mode == 4: # 指定好友
+            targets = select_friends(profile_mgr)
 
-    if profile_manager.is_enabled:
-        identifier = input(
-            "\n为正确解析对话和分类，请输入您自己的【UID】或【QQ号】: "
-        ).strip()
-        if identifier:
-            my_uid = profile_manager.find_uid(identifier)
-            if my_uid:
-                print(f"-> 已识别用户 UID: {my_uid}")
-                profile_manager.set_my_uid(my_uid)
-            else:
-                print(
-                    f"-> 提示: 未能通过'{identifier}'找到有效UID。昵称/备注显示可能不完整或分类错误。"
-                )
-        else:
-            print("提示: 未输入身份标识，昵称/备注显示可能不完整或分类错误。")
+        if mode != 1 and not targets:
+            print("\n--- 未选择任何导出目标，任务结束 ---")
+            return
 
-    rows = fetch_data(config)
-    if rows:
-        process_and_write(rows, config, profile_manager)
-    print("\n导出任务已完成。")
+        start_ts, end_ts = get_time_range()
+        name_style, name_format = select_name_style()
+        config = {
+            "start_ts": start_ts, 
+            "end_ts": end_ts, 
+            "name_style": name_style, 
+            "name_format": name_format, 
+            "profile_mgr": profile_mgr,
+            "run_timestamp": run_timestamp
+        }
 
+        if not os.path.exists(DB_FILENAME):
+            print(f"错误: 消息数据库文件 '{DB_FILENAME}' 不存在。")
+            return
+
+        try:
+            with sqlite3.connect(f"file:{DB_FILENAME}?mode=ro", uri=True) as con:
+                if mode == 1:
+                    export_timeline(con, config)
+                else:
+                    total = len(targets)
+                    for i, uid in enumerate(targets):
+                        export_one_on_one(con, uid, config, output_dir, i + 1, total)
+        except sqlite3.Error as e:
+            print(f"\n数据库错误: {e}")
+        except Exception as e:
+            print(f"\n发生未知错误: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print("\n--- 所有任务已完成 ---")
 
 if __name__ == "__main__":
     main()
+
