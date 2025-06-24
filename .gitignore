@@ -3,6 +3,7 @@
 !/.git
 !/.gitignore
 !/README.md
+!/CHANGELOG.md
 
 !/new_export_chats.py
 
