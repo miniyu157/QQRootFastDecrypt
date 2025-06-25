@@ -21,6 +21,7 @@ import base64
 from datetime import datetime
 import re
 import json
+import argparse
 
 
 # 尝试导入 blackboxprotobuf
@@ -33,13 +34,19 @@ except ImportError:
 
 # --- 常量定义 ---
 
-# 【文件与路径配置】
-DB_FILENAME = "nt_msg.decrypt.db"  # 解密后的QQ聊天记录数据库文件名
-PROFILE_DB_FILENAME = "profile_info.decrypt.db"  # 主人信息及好友列表数据库
-OUTPUT_DIR = "output_chats"  # 导出文件的存放文件夹
-TIMELINE_FILENAME_BASE = "chat_logs_timeline" # 全局时间线文件名前缀
-FRIENDS_LIST_FILENAME = "friends_list.txt" # 好友信息列表文件名
-ALL_USERS_LIST_FILENAME = "all_cached_users_list.txt" # 全部用户信息列表文件名
+# 【文件与路径配置】 - 这些是基础文件名，完整路径将在main函数中构建
+_DB_FILENAME = "nt_msg.decrypt.db"  # 解密后的QQ聊天记录数据库文件名
+_PROFILE_DB_FILENAME = "profile_info.decrypt.db"  # 主人信息及好友列表数据库
+_OUTPUT_DIR_NAME = "output_chats"  # 导出文件的存放文件夹
+_TIMELINE_FILENAME_BASE = "chat_logs_timeline" # 全局时间线文件名前缀
+_FRIENDS_LIST_FILENAME = "friends_list.txt" # 好友信息列表文件名
+_ALL_USERS_LIST_FILENAME = "all_cached_users_list.txt" # 全部用户信息列表文件名
+
+# 【动态路径变量】 - 将在main函数中根据命令行参数设置
+DB_PATH = ""
+PROFILE_DB_PATH = ""
+OUTPUT_DIR = ""
+
 
 # 【核心数据结构缓存】
 SALVAGE_CACHE = {}
@@ -126,7 +133,7 @@ class ProfileManager:
         加载所有用户信息的总入口。
         严格遵循 buddy_list 作为好友关系的唯一来源。
         """
-        print(f"\n正在从 '{PROFILE_DB_FILENAME}' 加载用户信息...")
+        print(f"\n正在从 '{os.path.basename(self.db_path.replace('file:', '').split('?')[0])}' 加载用户信息...")
         try:
             with sqlite3.connect(self.db_path, uri=True) as con:
                 cur = con.cursor()
@@ -658,7 +665,7 @@ def export_timeline(db_con, config):
         print("查询完成，但未能获取任何记录。")
         return
         
-    filename = f"{TIMELINE_FILENAME_BASE}{run_timestamp}.txt"
+    filename = f"{_TIMELINE_FILENAME_BASE}{run_timestamp}.txt"
     path = os.path.join(OUTPUT_DIR, filename)
     count = process_and_write(path, rows, profile_mgr, name_style, name_format, True)
     print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
@@ -711,11 +718,11 @@ def export_user_list(profile_mgr, list_mode, timestamp_str):
     if list_mode == 1:
         print("\n正在导出好友列表...")
         users_to_export = profile_mgr.user_info
-        base_filename = FRIENDS_LIST_FILENAME
+        base_filename = _FRIENDS_LIST_FILENAME
     else: # list_mode == 2
         print("\n正在导出全部缓存用户列表...")
         users_to_export = profile_mgr.all_profiles_cache
-        base_filename = ALL_USERS_LIST_FILENAME
+        base_filename = _ALL_USERS_LIST_FILENAME
 
     name, ext = os.path.splitext(base_filename)
     filename = f"{name}{timestamp_str}{ext}"
@@ -739,10 +746,23 @@ def export_user_list(profile_mgr, list_mode, timestamp_str):
 
 def main():
     """主执行函数，负责整个程序的流程控制。"""
+    # 0. 解析命令行参数
+    parser = argparse.ArgumentParser(description="QQ NT 聊天记录导出工具")
+    parser.add_argument('--workdir', type=str, default='.', help='指定工作目录，应包含解密后的数据库文件，并将在此创建输出文件夹。')
+    args = parser.parse_args()
+
+    # 设置全局路径变量
+    global DB_PATH, PROFILE_DB_PATH, OUTPUT_DIR
+    workdir = args.workdir
+    DB_PATH = os.path.join(workdir, _DB_FILENAME)
+    PROFILE_DB_PATH = os.path.join(workdir, _PROFILE_DB_FILENAME)
+    OUTPUT_DIR = os.path.join(workdir, _OUTPUT_DIR_NAME)
+
     print("--- QQ聊天记录导出工具 ---")
+    print(f"当前工作目录: {os.path.abspath(workdir)}")
     
     # 1. 初始化，加载所有用户信息
-    profile_mgr = ProfileManager(PROFILE_DB_FILENAME)
+    profile_mgr = ProfileManager(PROFILE_DB_PATH)
     profile_mgr.load_data()
     
     # 2. 让用户选择主模式
@@ -790,12 +810,12 @@ def main():
             "run_timestamp": run_timestamp
         }
 
-        if not os.path.exists(DB_FILENAME):
-            print(f"错误: 消息数据库文件 '{DB_FILENAME}' 不存在。")
+        if not os.path.exists(DB_PATH):
+            print(f"错误: 消息数据库文件 '{DB_PATH}' 不存在。")
             return
 
         try:
-            with sqlite3.connect(f"file:{DB_FILENAME}?mode=ro", uri=True) as con:
+            with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
                 if mode == 1:
                     export_timeline(con, config)
                 else:

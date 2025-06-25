@@ -13,6 +13,7 @@ QQ_BASE_PATH_DATA="/data/data/com.tencent.mobileqq"
 QQ_UID_DIR_SUFFIX="/files/uid/"
 QQ_DB_DIR_SUFFIX="/databases/nt_db/nt_qq_"
 QQ_BASE_PATH=""
+CMD_OUTPUT_DIR="$1" # 从命令行接收可选的第一个参数
 
 # --- 函数定义 ---
 
@@ -131,8 +132,20 @@ echo ""
 
 # 3. 设置输出目录
 DEFAULT_OUTPUT_DIR="/storage/emulated/0/QQRootFastDecrypt"
-read -p "$(echo -e ${C_BLUE}"请输入解密文件的输出目录 [默认为: ${DEFAULT_OUTPUT_DIR}]: "${C_NC})" -r -e -i "${DEFAULT_OUTPUT_DIR}" OUTPUT_DIR
-OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}" # 如果用户直接回车，使用默认值
+
+if [ -n "$CMD_OUTPUT_DIR" ]; then
+    # 如果通过命令行参数传递了路径，则直接使用
+    OUTPUT_DIR="$CMD_OUTPUT_DIR"
+else
+    # 否则，进入交互模式
+    read -p "$(echo -e ${C_BLUE}"请输入解密文件的输出目录 [默认为: ${DEFAULT_OUTPUT_DIR}]: "${C_NC})" -r -e READ_OUTPUT_DIR
+    # 如果用户直接回车（输入为空），则使用默认值
+    if [ -z "$READ_OUTPUT_DIR" ]; then
+      OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+    else
+      OUTPUT_DIR="$READ_OUTPUT_DIR"
+    fi
+fi
 
 # 规范化路径：移除末尾可能存在的斜杠，防止路径拼接时出现 //
 OUTPUT_DIR="${OUTPUT_DIR%/}"
@@ -142,9 +155,10 @@ mkdir -p "$OUTPUT_DIR"
 if [ ! -d "$OUTPUT_DIR" ]; then
     error_exit "无法创建输出目录: $OUTPUT_DIR"
 fi
+log_info "输出目录已设定为: ${C_YELLOW}${OUTPUT_DIR}${C_NC}"
 echo ""
 
-# 1. QQ安装路径检测
+# 4. QQ安装路径检测
 log_info "正在检测QQ数据路径..."
 if su -c "test -d $QQ_BASE_PATH_0" >/dev/null 2>&1; then
     QQ_BASE_PATH=$QQ_BASE_PATH_0
@@ -155,7 +169,7 @@ else
 fi
 log_success "检测到QQ数据路径: $QQ_BASE_PATH"
 
-# 2. 获取并解析QQ账号列表
+# 5. 获取并解析QQ账号列表
 QQ_UID_DIR="${QQ_BASE_PATH}${QQ_UID_DIR_SUFFIX}"
 uid_files_raw=$(su -c "ls -1 '$QQ_UID_DIR'" 2>/dev/null)
 if [ -z "$uid_files_raw" ]; then
@@ -175,7 +189,7 @@ if [ ${#qq_numbers[@]} -eq 0 ]; then
     error_exit "解析失败，未找到格式为 '{qq}###{uid}' 的文件。"
 fi
 
-# 3. 用户选择账号
+# 6. 用户选择账号
 echo "----------------------------------------"
 log_info "发现以下QQ账号，请选择要计算的账号："
 for i in "${!qq_numbers[@]}"; do
@@ -194,7 +208,7 @@ selected_uid="${uids[$selected_index]}"
 echo ""
 log_info "正在获取密钥..."
 
-# 4. 计算密钥所需的值
+# 7. 计算密钥所需的值
 # a. 计算 QQ UID 的 MD5 哈希值
 QQ_UID_hash=$(echo -n "$selected_uid" | md5sum | cut -d' ' -f1)
 
