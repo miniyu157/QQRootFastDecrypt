@@ -8,9 +8,13 @@
 
 推荐安装到 `/storage/emulated/0/QQRootFastDecrypt`
 
-## 快速开始
+## 快速开始 (一键启动)
 
-> 或者 `bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/start.sh')`
+```bash
+bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/start.sh')
+```
+
+## 快速开始
 
 ### 1. 安装依赖
 
