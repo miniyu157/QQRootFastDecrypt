@@ -6,16 +6,11 @@
 
 已解密的数据库统一命名为 `xxx.decrypt.db`
 
-## 目录
+推荐安装到 `/storage/emulated/0/QQRootFastDecrypt`
 
-> - 主要工具
->   - [# qqnt_decrypt.sh](#qqnt_decryptsh) 自动扫描 qq 账号，计算 key 并自动解密。
->   - [# export_chats.py](#export_chatspy) 从数据库中导出可读文本，提供各种导出模式。
-> - 其他工具
->   - [# get_qqnt_key.sh](#get_qqnt_keysh) 自动扫描 QQ 账号并计算 key。
->   - [# sqlite_to_json.py](#sqlite_to_jsonpy) SQLite 到 JSON 导出工具。
+## 快速开始
 
-## 安装依赖
+### 1. 安装依赖
 
 ```bash
 pkg update && pkg upgrade
@@ -23,17 +18,35 @@ pkg install sqlcipher python git
 pip install blackboxprotobuf
 ```
 
-## 下载仓库
+### 2. 下载仓库
 
 ```bash
 git clone https://github.com/miniyu157/QQRootFastDecrypt.git
+```
+
+### 3. 进入目录
+
+```
+cd /storage/emulated/0/QQRootFastDecrypt
+```
+
+### 4. 启动解密脚本
+
+```bash
+bash qqnt_decrypt.sh
+```
+
+### 5. 导出聊天记录
+    
+```
+python export_chats.py
 ```
 
 ## 主要工具
 
 ### qqnt_decrypt.sh
 
-自动扫描 qq 账号，计算 key 并自动解密数据库。默认解密 `nt_msg.decrypt.db` 和 `profile_info.decrypt.db`，可在源代码底部修改。
+自动扫描 qq 账号，计算 key 并自动解密数据库。默认解密 `nt_msg.decrypt.db` 和 `profile_info.decrypt.db`，可使用代码编辑器从底部修改。
 
 **快捷启动**
 
@@ -43,7 +56,7 @@ bash /storage/emulated/0/QQRootFastDecrypt/qqnt_decrypt.sh
 
 ### export_chats.py
 
-从数据库中导出可读文本。需要 `profile_info.decrypt.db` 加载用户信息列表以及主人身份信息
+从数据库中导出可读文本。需要 `profile_info.decrypt.db` 加载用户信息列表以及主人身份信息。
 
 - 导出模式
   - 全局时间线：以时间顺序排序，包含全部消息的单个文件
