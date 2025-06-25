@@ -10,6 +10,8 @@
 
 ## 快速开始
 
+> 或者 `bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/start.sh')`
+
 ### 1. 安装依赖
 
 ```bash
