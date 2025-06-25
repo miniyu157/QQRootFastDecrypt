@@ -2,19 +2,21 @@
 
 针对于已 root 安卓设备的快捷导出 QQ 聊天记录的脚本
 
-文档中的环境 [termux](https://github.com/termux/termux-app/releases) (com.termux) 版本 0.119.0-beta.2(1021)
+文档中使用的环境 [termux](https://github.com/termux/termux-app/releases) (com.termux) 版本 0.119.0-beta.3(1022)
 
 已解密的数据库统一命名为 `xxx.decrypt.db`
 
-推荐安装到 `/storage/emulated/0/QQRootFastDecrypt`
+[更新日志](https://github.com/miniyu157/QQRootFastDecrypt/blob/main/CHANGELOG.md)
 
-## 快速开始 (一键启动)
+## 快速开始
 
 ```bash
 bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/start.sh')
 ```
 
-## 快速开始
+## 慢速开始
+
+> 在 **慢速开始** 中，推荐安装到 `/storage/emulated/0/QQRootFastDecrypt`
 
 ### 1. 安装依赖
 
