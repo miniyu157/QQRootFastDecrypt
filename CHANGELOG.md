@@ -1,5 +1,21 @@
 # CHANGELOG
 
+### 提交 8714ca4
+
+    更新 qqnt_decrypt.sh export_chats.py
+    新增命令行参数，以搭配 start.sh (Gitee) 使用
+
+- 新增
+  - export_chats.py
+    - -h, --help         show this help message and exit
+    - --workdir 指定工作目录，应包含解密后的数据库文件
+  - qqnt_decrypt.sh
+    - 参数指定输出目录
+
+### 提交 a091811
+
+    新增 start.sh (Gitee) 一键启动脚本
+
 ### 提交 21bc68d
 
     删除 export_chats.py，重命名 new_export_chats.py -> export_chats.py
@@ -68,7 +84,7 @@
     新增四个工具脚本
 
 - 新增文件
-  - qqnt_decrypt.sh 自动扫描 QQ 账号，计算 key 并自动解密。
-  - export_chats.py 从数据库中导出可读文本，提供各种导出模式。
-  - get_qqnt_key.sh 自动扫描 QQ 账号并计算 key。
-  - sqlite_to_json.py SQLite 到 JSON 导出工具。
+  - qqnt_decrypt.sh 自动扫描 QQ 账号，计算 key 并自动解密
+  - export_chats.py 从数据库中导出可读文本，提供各种导出模式
+  - get_qqnt_key.sh 自动扫描 QQ 账号并计算 key
+  - sqlite_to_json.py SQLite 到 JSON 导出工具
