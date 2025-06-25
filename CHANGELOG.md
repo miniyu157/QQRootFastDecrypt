@@ -41,14 +41,7 @@
 
 - 差异
   - 修复引用 **protobuf 解码失败的消息** 时错误解码
-
-### 提交 866e56f
-
-    更新 README.md
-
-### 提交 5e2b1ec
-
-    更新 README.md
+  - 语音消息显示转文字内容
 
 ### 提交 ae0f79e
 
@@ -79,8 +72,3 @@
   - export_chats.py 从数据库中导出可读文本，提供各种导出模式。
   - get_qqnt_key.sh 自动扫描 QQ 账号并计算 key。
   - sqlite_to_json.py SQLite 到 JSON 导出工具。
-
-### 提交 0453961
-
-    Initial commit
-
