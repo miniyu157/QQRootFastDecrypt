@@ -1,5 +1,9 @@
 # CHANGELOG
 
+### 提交 c8aec15
+
+    优化交互菜单，新增导出全部分组
+
 ### 提交 8714ca4
 
     更新 qqnt_decrypt.sh export_chats.py
