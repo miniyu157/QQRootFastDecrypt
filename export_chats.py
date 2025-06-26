@@ -22,6 +22,11 @@ from datetime import datetime
 import re
 import json
 import argparse
+import warnings
+
+# 忽略 google.protobuf 的 pkg_resources DEPRECATED 警告
+# 这是 protobuf 库的一个已知问题，与本脚本功能无关
+warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
 
 # 尝试导入 blackboxprotobuf
@@ -266,11 +271,11 @@ def _parse_time_string(input_str: str) -> dict or None:
         'second': int(second) if second is not None else None
     }
 
-def get_time_range():
+def get_time_range(path_title):
     """
     【交互功能】提示用户输入时间范围，并返回处理后的起始和结束时间戳。
     """
-    print("\n--- 请设定时间范围 (可选) ---")
+    print(f"\n--- {path_title} ---")
     print("格式:YYYY-MM-DD HH:MM:SS (年可选, 符号可为-/.或年月日)")
     print("留空则导出全部。只输入日期则包含全天。")
     start_ts, end_ts = None, None
@@ -493,35 +498,35 @@ def decode_message_content(content, timestamp, profile_mgr, name_style, name_for
         return [b64]
 
 # --- 用户交互与选择 ---
-def select_export_mode():
+def select_export_mode(path_title):
     """让用户选择主导出模式。"""
-    print("\n--- 请选择导出模式 ---")
-    options = ["全局时间线", "导出全部好友", "按分组导出", "指定好友导出", "导出用户信息列表"]
+    print(f"\n--- {path_title} ---")
+    options = ["导出一个文件", "导出全部好友", "导出分组", "导出指定好友", "导出用户信息列表"]
     for i, opt in enumerate(options): print(f"  {i+1}. {opt}")
     while True:
         choice = input(f"请输入选项序号 (1-{len(options)}): ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(options): return int(choice)
-        print("  -> 无效输入，请重试。")
+        exit(1)
 
-def select_user_list_mode():
+def select_user_list_mode(path_title):
     """让用户选择导出用户列表的范围。"""
-    print("\n--- 请选择要导出的用户范围 ---")
+    print(f"\n--- {path_title} ---")
     options = ["仅好友", "全部缓存用户"]
     for i, opt in enumerate(options): print(f"  {i+1}. {opt}")
     while True:
         choice = input(f"请输入选项序号 (1-{len(options)}): ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(options): return int(choice)
-        print("  -> 无效输入，请重试。")
+        return None # 无效输入则返回
 
-def select_name_style():
+def select_name_style(path_title):
     """让用户选择导出的名称显示格式，并支持回车使用默认值。"""
-    print("\n--- 请选择用户标识显示格式 ---")
+    print(f"\n--- {path_title} ---")
     styles = {'1': 'default', '2': 'nickname', '3': 'qq', '4': 'uid', '5': 'custom'}
     descs = {'1': "备注/昵称 (优先显示备注) [默认]", '2': "昵称", '3': "QQ号码", '4': "UID", '5': "自定义格式"}
     for k, v in descs.items(): print(f"  {k}. {v}")
     
     while True:
-        choice = input(f"请输入选项序号 (1-5, 直接回车使用默认值): ").strip()
+        choice = input(f"请输入选项序号 (1-5): ").strip()
         
         if not choice:
             choice = '1'
@@ -535,7 +540,7 @@ def select_name_style():
             return style, custom_fmt
         print("  -> 无效输入，请重试。")
 
-def select_friends(profile_mgr: ProfileManager):
+def select_friends(profile_mgr, path_title):
     """
     【交互功能】提供一个可交互的菜单让用户选择一个或多个好友。
     支持按分组查看或全部展开，全部展开时会保留分组标题。
@@ -548,31 +553,34 @@ def select_friends(profile_mgr: ProfileManager):
         friends_by_group[gid].append(uid)
     
     while True:
-        print("\n--- 请选择要导出的好友 ---")
+        print(f"\n--- {path_title} ---")
         sorted_groups = sorted(friends_by_group.items(), key=lambda i: profile_mgr.group_info.get(i[0], str(i[0])))
         choices = {str(i+1): gid for i, (gid, uids) in enumerate(sorted_groups)}
         for i, (gid, uids) in enumerate(sorted_groups):
             name = profile_mgr.group_info.get(gid, f"分组_{gid}")
             print(f"  {i+1}. {name} ({len(uids)}人)")
         print("  a. 全部展开")
-        choice = input("请选择分组序号或'a'查看好友: ").strip().lower()
+        choice = input("请选择分组序号或'a'全部展开 ").strip().lower()
         
         gids_to_show = []
+        group_name_for_title = ""
         if choice == 'a':
             gids_to_show = [gid for gid, uids in sorted_groups]
+            group_name_for_title = "全部展开"
         elif choice in choices:
-            gids_to_show.append(choices[choice])
+            selected_gid = choices[choice]
+            gids_to_show.append(selected_gid)
+            group_name_for_title = profile_mgr.group_info.get(selected_gid, f"分组_{selected_gid}")
         else:
-            print("  -> 无效输入。")
-            continue
+            return None # 无效输入则返回
 
-        print("\n--- 请选择好友 (可多选，用空格或逗号分隔) ---")
+        print(f"\n--- {path_title} > {group_name_for_title} ---")
         selectable = {}
         i = 1
         for gid in gids_to_show:
-            if choice == 'a':
-                group_name = profile_mgr.group_info.get(gid, f"分组_{gid}")
-                print(f"\n--- {group_name} ---")
+            if choice == 'a': # 如果是全部展开模式，额外显示分组标题
+                current_group_name = profile_mgr.group_info.get(gid, f"分组_{gid}")
+                print(f"\n--- {current_group_name} ---")
             
             if not friends_by_group.get(gid):
                 print("  (此分组下没有好友)")
@@ -590,28 +598,35 @@ def select_friends(profile_mgr: ProfileManager):
             print("没有可供选择的好友。")
             continue
             
-        choices_str = input("请输入好友序号: ").strip()
+        choices_str = input("请输入好友序号 (可多选，用空格或逗号分隔): ").strip()
         selected = [selectable[c] for c in re.split(r'[\s,]+', choices_str) if c in selectable]
         if selected: return list(set(selected))
-        print("  -> 未选择任何好友。")
+        # 无效或空输入，循环回到分组选择
+        continue
 
 
-def select_group(profile_mgr: ProfileManager):
+def select_group(profile_mgr, path_title):
     """让用户从分组列表中选择一个分组。"""
-    print("\n--- 请选择要导出的分组 ---")
+    print(f"\n--- {path_title} ---")
     friends_by_group = {info.get('group_id'): [] for uid, info in profile_mgr.user_info.items() if uid != profile_mgr.my_uid}
     for uid, info in profile_mgr.user_info.items():
         if uid != profile_mgr.my_uid: friends_by_group[info.get('group_id')].append(uid)
     
     sorted_groups = sorted(profile_mgr.group_info.items(), key=lambda i: i[1])
     choices = {str(i+1): gid for i, (gid, name) in enumerate(sorted_groups)}
+    
+    print("  a. 全部导出")
     for i, (gid, name) in enumerate(sorted_groups):
         count = len(friends_by_group.get(gid, []))
         print(f"  {i+1}. {name} ({count}人)")
+
     while True:
-        choice = input(f"请输入分组序号 (1-{len(choices)}): ").strip()
-        if choice in choices: return choices[choice]
-        print("  -> 无效输入，请重试。")
+        choice = input(f"请输入分组序号: ").strip().lower()
+        if choice == 'a':
+            return 'all_groups'
+        if choice in choices: 
+            return choices[choice]
+        return None # 无效输入则返回
 
 # --- 导出执行逻辑 ---
 def process_and_write(output_path, rows, profile_mgr, name_style, name_format, is_timeline=False):
@@ -624,7 +639,6 @@ def process_and_write(output_path, rows, profile_mgr, name_style, name_format, i
             if not parts: continue
             
             text = " ".join(str(p) for p in parts if not isinstance(p, dict))
-            if text == "[系统提示]": continue
             
             time = format_timestamp(ts)
             first = parts[0]
@@ -758,25 +772,34 @@ def main():
     PROFILE_DB_PATH = os.path.join(workdir, _PROFILE_DB_FILENAME)
     OUTPUT_DIR = os.path.join(workdir, _OUTPUT_DIR_NAME)
 
-    print("--- QQ聊天记录导出工具 ---")
+    print("===== QQ聊天记录导出工具 =====")
     print(f"当前工作目录: {os.path.abspath(workdir)}")
     
     # 1. 初始化，加载所有用户信息
     profile_mgr = ProfileManager(PROFILE_DB_PATH)
     profile_mgr.load_data()
     
-    # 2. 让用户选择主模式
-    mode = select_export_mode()
-    
-    # 3. 统一创建主输出目录和生成本次运行的时间戳
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    run_timestamp = f"_{int(datetime.now().timestamp())}"
-    
-    # 4. 根据模式执行不同操作
-    if mode == 5: # 导出用户信息列表
-        list_mode = select_user_list_mode()
-        export_user_list(profile_mgr, list_mode, run_timestamp)
-    else: # 导出聊天记录
+    # 主循环，允许从子菜单返回
+    while True:
+        # 2. 让用户选择主模式
+        path_title = "主菜单"
+        mode = select_export_mode(path_title)
+        
+        # 3. 统一创建主输出目录和生成本次运行的时间戳
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        run_timestamp = f"_{int(datetime.now().timestamp())}"
+        
+        mode_titles = {1: "导出一个文件", 2: "导出全部好友", 3: "导出分组", 4: "导出指定好友", 5: "导出用户信息列表"}
+        path_title += f" > {mode_titles.get(mode)}"
+        
+        # 4. 根据模式执行不同操作
+        if mode == 5:
+            list_mode = select_user_list_mode(path_title)
+            if list_mode is None: continue
+            export_user_list(profile_mgr, list_mode, run_timestamp)
+            break 
+        
+        # --- 导出聊天记录流程 ---
         targets = []
         output_dir = None
         
@@ -786,21 +809,34 @@ def main():
             output_dir = os.path.join(OUTPUT_DIR, "friends")
             targets = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
         elif mode == 3: # 按分组
-            gid = select_group(profile_mgr)
-            name = profile_mgr.group_info.get(gid, f"分组{gid}")
-            safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid}_{name}")
-            output_dir = os.path.join(OUTPUT_DIR, "friends", safe_name)
-            targets = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid]
-            if not targets: print("该分组下没有好友。")
+            gid_or_all = select_group(profile_mgr, path_title)
+            if gid_or_all is None: continue
+            
+            if gid_or_all == 'all_groups':
+                all_friends_in_groups = []
+                for gid in profile_mgr.group_info.keys():
+                    group_name = profile_mgr.group_info.get(gid, f"分组{gid}")
+                    safe_group_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid}_{group_name}")
+                    group_output_dir = os.path.join(OUTPUT_DIR, "friends", safe_group_name)
+                    friends_in_group = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid]
+                    all_friends_in_groups.append({'dir': group_output_dir, 'friends': friends_in_group})
+                targets = all_friends_in_groups
+            else:
+                gid = gid_or_all
+                name = profile_mgr.group_info.get(gid, f"分组{gid}")
+                safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid}_{name}")
+                output_dir = os.path.join(OUTPUT_DIR, "friends", safe_name)
+                targets = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid]
+                if not targets: print("该分组下没有好友。")
         elif mode == 4: # 指定好友
-            targets = select_friends(profile_mgr)
+            targets = select_friends(profile_mgr, path_title)
+            if targets is None: continue
 
         if mode != 1 and not targets:
-            print("\n--- 未选择任何导出目标，任务结束 ---")
-            return
+            continue
 
-        start_ts, end_ts = get_time_range()
-        name_style, name_format = select_name_style()
+        start_ts, end_ts = get_time_range(f"{path_title} > 设定时间范围")
+        name_style, name_format = select_name_style(f"{path_title} > 设定用户标识")
         config = {
             "start_ts": start_ts, 
             "end_ts": end_ts, 
@@ -818,6 +854,15 @@ def main():
             with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
                 if mode == 1:
                     export_timeline(con, config)
+                elif mode == 3 and isinstance(targets, list) and targets and isinstance(targets[0], dict):
+                    print("\n即将导出所有分组...")
+                    total_friends_count = sum(len(g['friends']) for g in targets)
+                    current_friend_index = 0
+                    for group_data in targets:
+                        group_dir = group_data['dir']
+                        for friend_uid in group_data['friends']:
+                            current_friend_index += 1
+                            export_one_on_one(con, friend_uid, config, group_dir, current_friend_index, total_friends_count)
                 else:
                     total = len(targets)
                     for i, uid in enumerate(targets):
@@ -828,6 +873,8 @@ def main():
             print(f"\n发生未知错误: {e}")
             import traceback
             traceback.print_exc()
+            
+        break # 任务完成，退出主循环
 
     print("\n--- 所有任务已完成 ---")
 
