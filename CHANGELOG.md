@@ -1,6 +1,6 @@
 # CHANGELOG
 
-### eb5177c
+### 提交 eb5177c
 
     更新 export_chats.py
 
