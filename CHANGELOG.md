@@ -15,23 +15,23 @@
 
 ### 提交 c8aec15
 
-    优化交互菜单，新增导出全部分组
+    更新 export_chats.py 优化交互菜单，新增导出全部分组
 
 ### 提交 8714ca4
 
     更新 qqnt_decrypt.sh export_chats.py
     新增命令行参数，以搭配 start.sh (Gitee) 使用
 
-- 新增
-  - export_chats.py
-    - -h, --help         show this help message and exit
-    - --workdir 指定工作目录，应包含解密后的数据库文件
-  - qqnt_decrypt.sh
-    - 参数指定输出目录
+- export_chats.py
+  - -h, --help         show this help message and exit
+  - --workdir 指定工作目录，应包含解密后的数据库文件
+- qqnt_decrypt.sh
+  - 参数指定输出目录
 
 ### 提交 a091811
 
     新增 start.sh (Gitee) 一键启动脚本
+    bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/start.sh')
 
 ### 提交 21bc68d
 
@@ -53,20 +53,19 @@
     
 ### 提交 457e904
 
-    更新 new_export_chats.py
+    更新 new_export_chats.py 功能回归
 
-- 差异
-  - 连接 `profile_info.decrypt.db` 读取 UID 以及用户信息
-  - 模式
-    - 全局时间线
-    - 导出全部好友
-    - 按分组导出
-    - 指定好友导出
-    - 导出用户信息列表
-      - 仅好友
-      - 全部缓存用户
-  - 新增选项 设定时间范围
-  - 新增选项 用户标识显示格式
+- 连接 `profile_info.decrypt.db` 读取 UID 以及用户信息
+- 模式
+  - 全局时间线
+  - 导出全部好友
+  - 按分组导出
+  - 指定好友导出
+  - 导出用户信息列表
+    - 仅好友
+    - 全部缓存用户
+- 新增选项 设定时间范围
+- 新增选项 用户标识显示格式
 
 ### 提交 471c1a9
 
@@ -80,12 +79,11 @@
 
     更新 new_export_chats.py
 
-- 差异
-  - 戳一戳互动，也使用 UID
-  - 移除无内容系统提示
-  - 红包区分为 **普通红包** 与 **口令红包**，并显示描述
-  - 图片区分为 **图片** 与 **闪照**
-  - 对于 **protobuf 解码失败的消息**，读取可读文本
+- 戳一戳互动，也使用 UID
+- 移除无内容系统提示
+- 红包区分为 **普通红包** 与 **口令红包**，并显示描述
+- 图片区分为 **图片** 与 **闪照**
+- 对于 **protobuf 解码失败的消息**，读取可读文本
 
 ### 提交 55e630d
 
