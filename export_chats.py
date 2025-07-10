@@ -23,6 +23,7 @@ import re
 import json
 import argparse
 import warnings
+import hashlib
 
 # 忽略 google.protobuf 的 pkg_resources DEPRECATED 警告
 # 这是 protobuf 库的一个已知问题，与本脚本功能无关
@@ -152,7 +153,8 @@ class ConfigManager:
             'export_markdown': True,
             'show_media_info': False,
             'name_style': 'default',
-            'name_format': ''
+            'name_format': '',
+            'add_file_header': True
         }
         self.config = self.load_config()
 
@@ -303,7 +305,20 @@ class ProfileManager:
         
         return f"{qq}_{safe_name_part}{safe_remark_part}{timestamp_str}{ext}"
 
-# --- 时间处理函数 ---
+# --- 时间与文件处理函数 ---
+def _calculate_sha256(filepath):
+    """计算文件的SHA256哈希值"""
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except FileNotFoundError:
+        return "文件未找到"
+    except Exception as e:
+        return f"计算错误: {e}"
+
 def _parse_time_string(input_str: str) -> dict or None:
     """
     极度人性化地解析各种日期时间格式。
@@ -695,6 +710,86 @@ def decode_message_content(content, timestamp, profile_mgr, name_style, name_for
         SALVAGE_CACHE[timestamp] = b64
         return [b64]
 
+def _generate_file_header(config: dict, rows: list, scope_info: dict) -> str:
+    """根据导出配置和范围，动态生成文件头字符串"""
+    if not config['export_config'].get('add_file_header', False) or not rows:
+        return ""
+        
+    profile_mgr = config['profile_mgr']
+    
+    # 1. 计算文件哈希
+    msg_db_hash = _calculate_sha256(DB_PATH)
+    profile_db_hash = _calculate_sha256(PROFILE_DB_PATH)
+
+    # 2. 格式化时间
+    gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    start_time = format_timestamp(rows[0][0])
+    end_time = format_timestamp(rows[-1][0])
+
+    # 3. 获取主人信息 (使用原始昵称)
+    my_info = profile_mgr.user_info.get(profile_mgr.my_uid, {})
+    master_name = my_info.get('nickname', '未知')
+    master_qq = my_info.get('qq', '未知')
+    
+    # 4. 生成好友范围文本
+    scope_text = "未知范围"
+    scope_type = scope_info.get('type')
+    if scope_type == 'individual':
+        friend_uid = scope_info['friend_uid']
+        friend_info = profile_mgr.user_info.get(friend_uid, {})
+        friend_nick = friend_info.get('nickname', friend_uid) # 使用原始昵称
+        friend_remark = friend_info.get('remark')
+        remark_str = f" ({friend_remark})" if friend_remark else ""
+        scope_text = f"{master_name} 与 {friend_nick}{remark_str} 的聊天"
+    elif scope_type == 'timeline':
+        selection_mode = scope_info['selection_mode']
+        if selection_mode in ['all_friends', 'all_groups']:
+            scope_text = "全部好友"
+        elif selection_mode == 'group':
+            gid = scope_info['details']['gid']
+            gname = profile_mgr.group_info.get(gid, f"分组_{gid}")
+            count = scope_info['details']['count']
+            scope_text = f'分组"{gname}" ({count}人)'
+        elif selection_mode == 'selected_friends':
+            uids = scope_info['details']['uids']
+            nicks = [profile_mgr.user_info.get(uid, {}).get('nickname', uid) for uid in uids]
+            if len(nicks) <= 5:
+                scope_text = "、".join(nicks)
+            else:
+                scope_text = f'{"、".join(nicks[:5])} 等{len(nicks)}人'
+
+    # 5. 获取用户标识风格文本
+    style_map = {'default': "昵称/备注", 'nickname': "昵称", 'qq': "QQ号码", 'uid': "UID", 'custom': "组合标识"}
+    identifier_style_text = style_map.get(config['name_style'], "未知")
+
+    # 6. 生成动态提示文本
+    included_features = []
+    cfg = config['export_config']
+    if cfg.get('show_recall'): included_features.append("撤回提示")
+    if cfg.get('show_poke'): included_features.append("拍一拍/戳一戳")
+    if cfg.get('show_voice_to_text'): included_features.append("语音转文字")
+    hint_text = "此文件由工具自动生成。记录包含文本、图片、引用"
+    if included_features:
+        hint_text += f"、{'、'.join(included_features)}"
+    hint_text += "等消息。部分Ark卡片、系统消息和未知类型的消息可能被简化或忽略，旨在尽可能还原原始对话顺序和内容。"
+
+    # 7. 组装完整的文件头
+    header = (
+        "QQ 聊天记录归档\n\n"
+        "数据来源:\n"
+        f"- nt_msg.decrypt.db (sha256): {msg_db_hash}\n"
+        f"- profile_info.decrypt.db (sha256): {profile_db_hash}\n\n"
+        f"文件生成时间: {gen_time}\n"
+        f"记录开始时间: {start_time}\n"
+        f"记录结束时间: {end_time}\n\n"
+        f"主人账号: {master_name} ({master_qq})\n"
+        f"好友范围: {scope_text}\n"
+        f"用户标识: {identifier_style_text}\n\n"
+        f"提示: {hint_text}\n\n"
+        f"{'-'*40}\n\n"
+    )
+    return header
+
 # --- 用户交互与选择 ---
 def select_export_mode():
     """让用户选择主导出模式。"""
@@ -750,20 +845,19 @@ def manage_export_config(path_title, config_mgr):
         # 定义其他设置
         other_options = {
             '6': ('export_markdown', "输出为 Markdown (.md)"),
-            '7': ('name_style', "用户标识格式")
+            '7': ('name_style', "用户标识格式"),
+            '8': ('add_file_header', "添加文件头")
         }
         
         print("> 其他设置")
-        # Markdown 开关
-        md_key, md_label = '6', other_options['6'][1]
-        md_status = "开" if temp_config.get(other_options['6'][0]) else "关"
-        print(f"  {md_key}. [{md_status}] {md_label}")
-        
-        # 用户标识格式
-        id_key, id_label = '7', other_options['7'][1]
-        current_style = temp_config.get('name_style', 'default')
-        style_map = {'default': "备注/昵称", 'nickname': "昵称", 'qq': "QQ号", 'uid': "UID", 'custom': "自定义"}
-        print(f"  {id_key}. {id_label}: [{style_map.get(current_style, '未知')}]")
+        for key, (config_key, label) in other_options.items():
+            if config_key == 'name_style':
+                current_style = temp_config.get(config_key, 'default')
+                style_map = {'default': "备注/昵称", 'nickname': "昵称", 'qq': "QQ号", 'uid': "UID", 'custom': "自定义"}
+                print(f"  {key}. {label}: [{style_map.get(current_style, '未知')}]")
+            else:
+                status = "开" if temp_config.get(config_key) else "关"
+                print(f"  {key}. [{status}] {label}")
 
         choice_str = input("请输入要操作的选项序号 (可多选，如 123)，回车键保存并返回: ").strip()
 
@@ -779,14 +873,15 @@ def manage_export_config(path_title, config_mgr):
                 config_key = content_options[key][0]
                 temp_config[config_key] = not temp_config[config_key]
                 toggled = True
-            elif key == '6':
-                temp_config['export_markdown'] = not temp_config['export_markdown']
+            elif key in other_options:
+                config_key = other_options[key][0]
+                if config_key == 'name_style':
+                     style, fmt = select_name_style(f"{path_title} > {other_options[key][1]}")
+                     temp_config['name_style'] = style
+                     temp_config['name_format'] = fmt
+                else:
+                    temp_config[config_key] = not temp_config[config_key]
                 toggled = True
-            elif key == '7':
-                style, fmt = select_name_style(f"{path_title} > {id_label}")
-                temp_config['name_style'] = style
-                temp_config['name_format'] = fmt
-                toggled = True # 标记为已处理，以便刷新菜单
 
         if not toggled:
             break
@@ -913,7 +1008,7 @@ def select_group(profile_mgr, path_title):
         return None # 无效输入则返回
 
 # --- 导出执行逻辑 ---
-def process_and_write(output_path, rows, profile_mgr, config):
+def process_and_write(output_path, rows, profile_mgr, config, header_content=""):
     """将查询到的数据库行处理并写入文件，支持txt和markdown两种格式。"""
     is_markdown = config['export_config'].get('export_markdown', False)
     name_style = config.get('name_style', 'default')
@@ -921,9 +1016,14 @@ def process_and_write(output_path, rows, profile_mgr, config):
     
     count = 0
     with open(output_path, "w", encoding="utf-8") as f:
+        if header_content:
+            f.write(header_content)
+
         if is_markdown:
             last_date = None
             last_sender_key = None
+            last_element_was_quote = False # 状态追踪变量
+            
             for row in rows:
                 ts, s_uid, p_uid, content = row
                 parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
@@ -943,18 +1043,26 @@ def process_and_write(output_path, rows, profile_mgr, config):
                 else:
                     sender_key = sender_display
 
+                # --- 标题写入逻辑 ---
                 if current_date != last_date:
-                    f.write(f"\n# {current_date}\n")
+                    if last_date is not None:
+                        if not last_element_was_quote:
+                            f.write(f"\n")
+                    f.write(f"# {current_date}\n")
                     last_date = current_date
                     last_sender_key = None
+                    last_element_was_quote = False
                 
                 if sender_key != last_sender_key:
-                    f.write(f"\n### {sender_key}\n")
+                    if not last_element_was_quote:
+                        f.write(f"\n")
+                    f.write(f"### {sender_key}\n")
                     last_sender_key = sender_key
+                    last_element_was_quote = False
 
+                # --- 消息解析与写入逻辑 ---
                 main_text_parts = []
                 quote_content = ""
-
                 is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
                 
                 if not is_reply and isinstance(parts[0], dict) and parts[0].get("type") == "interactive_tip":
@@ -980,6 +1088,9 @@ def process_and_write(output_path, rows, profile_mgr, config):
                 f.write(f"* {current_time} {main_text}\n")
                 if quote_content:
                     f.write(f"  > {quote_content}\n\n")
+                    last_element_was_quote = True
+                else:
+                    last_element_was_quote = False
                 
                 count += 1
 
@@ -995,10 +1106,7 @@ def process_and_write(output_path, rows, profile_mgr, config):
                 if not is_reply:
                     MESSAGE_CONTENT_CACHE[ts] = text
                 else:
-                    # 仅在非Markdown模式下，对引用消息进行格式化
-                    # 匹配格式: [引用->YYYY-MM-DD HH:MM:SS 剩余所有内容]
                     pattern = r'\[引用->(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)\]'
-                    # 替换格式: [引用-> [YYYY-MM-DD HH:MM:SS] 剩余所有内容 <-]
                     replacement = r'[引用-> [\1] \2 <-]'
                     text = re.sub(pattern, replacement, text, count=1)
 
@@ -1019,7 +1127,7 @@ def process_and_write(output_path, rows, profile_mgr, config):
                 count += 1
     return count
 
-def export_timeline(db_con, config, target_uids):
+def export_timeline(db_con, config, target_uids, scope_info):
     """执行全局时间线导出。"""
     print("\n正在执行“全局时间线”导出...")
     start_ts, end_ts, name_style, name_format, profile_mgr, run_timestamp, export_config = config.values()
@@ -1058,12 +1166,14 @@ def export_timeline(db_con, config, target_uids):
     filename = f"{_TIMELINE_FILENAME_BASE}{run_timestamp}{ext}"
     path = os.path.join(timeline_dir, filename)
     
+    header = _generate_file_header(config, rows, scope_info)
+
     process_config = config.copy()
     process_config['is_timeline'] = True
-    count = process_and_write(path, rows, profile_mgr, process_config)
+    count = process_and_write(path, rows, profile_mgr, process_config, header)
     print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
 
-def export_one_on_one(db_con, friend_uid, config, out_dir=None, index=None, total=None):
+def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, index=None, total=None):
     """导出一个好友的一对一聊天记录。"""
     start_ts, end_ts, name_style, name_format, profile_mgr, run_timestamp, export_config = config.values()
     
@@ -1101,9 +1211,11 @@ def export_one_on_one(db_con, friend_uid, config, out_dir=None, index=None, tota
     filename = profile_mgr.get_filename(friend_uid, run_timestamp, export_config.get('export_markdown'))
     path = os.path.join(output_dir, filename)
     
+    header = _generate_file_header(config, rows, scope_info)
+    
     process_config = config.copy()
     process_config['is_timeline'] = False
-    count = process_and_write(path, rows, profile_mgr, process_config)
+    count = process_and_write(path, rows, profile_mgr, process_config, header)
     print(f"-> 共导出 {count} 条消息到 {path}")
 
 def export_user_list(profile_mgr, list_mode, timestamp_str):
@@ -1195,42 +1307,41 @@ def main():
         
         # --- 导出聊天记录流程 ---
         
-        # 定义共同的流程
         target_uids = []
         is_timeline_mode = mode in [1, 2, 3]
+        scope_info = {}
+        gid_or_all = None
         
-        # 根据模式获取目标用户UIDs
-        if mode == 1 or mode == 4: # 全部好友
+        # 根据模式获取目标用户UIDs和范围信息
+        if mode == 1 or mode == 4:
             target_uids = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
-        elif mode == 2 or mode == 5: # 选择分组
+            scope_info = {'type': 'timeline', 'selection_mode': 'all_friends'}
+        elif mode == 2 or mode == 5:
             gid_or_all = select_group(profile_mgr, path_title)
             if gid_or_all is None: continue
             if gid_or_all == 'all_groups':
-                # 在单独文件模式下，这表示按文件夹结构导出所有分组
-                if mode == 5: 
-                    target_uids = 'all_groups_structured'
-                else: # 时间线模式下，就是所有好友
-                    target_uids = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
+                target_uids = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
+                if mode == 5: target_uids = 'all_groups_structured'
+                scope_info = {'type': 'timeline', 'selection_mode': 'all_groups'}
             else:
                 target_uids = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid_or_all]
-        elif mode == 3 or mode == 6: # 选择好友
+                scope_info = {'type': 'timeline', 'selection_mode': 'group', 'details': {'gid': gid_or_all, 'count': len(target_uids)}}
+        elif mode == 3 or mode == 6:
             target_uids = select_friends(profile_mgr, path_title)
             if not target_uids: continue
-        
+            scope_info = {'type': 'timeline', 'selection_mode': 'selected_friends', 'details': {'uids': target_uids}}
+
         if not target_uids:
             print("未选择任何好友或分组内无好友。")
             continue
             
         start_ts, end_ts = get_time_range(f"{path_title} > 设定时间范围")
         
-        # 从配置中读取name_style, name_format
         config = {
-            "start_ts": start_ts, 
-            "end_ts": end_ts, 
+            "start_ts": start_ts, "end_ts": end_ts, 
             "name_style": config_mgr.config.get('name_style', 'default'),
             "name_format": config_mgr.config.get('name_format', ''),
-            "profile_mgr": profile_mgr,
-            "run_timestamp": run_timestamp,
+            "profile_mgr": profile_mgr, "run_timestamp": run_timestamp,
             "export_config": config_mgr.config
         }
         
@@ -1241,7 +1352,7 @@ def main():
         try:
             with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
                 if is_timeline_mode:
-                    export_timeline(con, config, target_uids)
+                    export_timeline(con, config, target_uids, scope_info)
                 else: # 单独文件模式
                     if target_uids == 'all_groups_structured':
                         print("\n即将按分组结构导出所有好友...")
@@ -1259,20 +1370,22 @@ def main():
                         total_friends_count = len(all_friends)
                         current_friend_index = 0
                         for gid in sorted(groups_data.keys()):
-                            group_info = groups_data[gid]
-                            for friend_uid in group_info['friends']:
+                            group_info_struct = groups_data[gid]
+                            for friend_uid in group_info_struct['friends']:
                                 current_friend_index += 1
-                                export_one_on_one(con, friend_uid, config, group_info['dir'], current_friend_index, total_friends_count)
+                                individual_scope_info = {'type': 'individual', 'friend_uid': friend_uid}
+                                export_one_on_one(con, friend_uid, config, individual_scope_info, group_info_struct['dir'], current_friend_index, total_friends_count)
                     else:
                         output_dir = None
-                        if mode == 5: # 按分组导出-单个分组
+                        if mode == 5:
                              name = profile_mgr.group_info.get(gid_or_all, f"分组{gid_or_all}")
                              safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid_or_all}_{name}")
                              output_dir = os.path.join(OUTPUT_DIR, "Individual", safe_name)
                         
                         total = len(target_uids)
                         for i, uid in enumerate(target_uids):
-                            export_one_on_one(con, uid, config, output_dir, i + 1, total)
+                            individual_scope_info = {'type': 'individual', 'friend_uid': uid}
+                            export_one_on_one(con, uid, config, individual_scope_info, output_dir, i + 1, total)
 
         except sqlite3.Error as e:
             print(f"\n数据库错误: {e}")
