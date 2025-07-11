@@ -16,6 +16,9 @@ bash <(curl -sL 'https://gitee.com/KlxPiao/qqroot-fast-decrypt-start/raw/master/
 
 ## 慢速开始
 
+<details>
+<summary>展开/隐藏详情</summary>
+
 > 在 **慢速开始** 中，推荐安装到 `/storage/emulated/0/QQRootFastDecrypt`
 
 ### 1. 安装依赖
@@ -50,17 +53,9 @@ bash qqnt_decrypt.sh
 python export_chats.py
 ```
 
+</details>
+
 ## 主要工具
-
-### qqnt_decrypt.sh
-
-自动扫描 qq 账号，计算 key 并自动解密数据库。默认解密 `nt_msg.decrypt.db` 和 `profile_info.decrypt.db`，可使用代码编辑器从底部修改。
-
-**快捷启动**
-
-```bash
-bash /storage/emulated/0/QQRootFastDecrypt/qqnt_decrypt.sh
-```
 
 ### qqnt_decrypt.sh
 
@@ -89,13 +84,21 @@ bash /storage/emulated/0/QQRootFastDecrypt/qqnt_decrypt.sh
 
 所有配置项均可通过菜单修改，并自动保存至 `export_config.json` 文件。
 
-* **输出格式**: 可在 `Markdown(.md)` 和纯文本 `(.txt)` 之间切换。
+* **输出格式**: 可在 `TXT`、`MD` 和 `HTML` 之间自由切换。
+* **HTML模板**: 当输出格式为HTML时，可从 `html_templates` 文件夹中选择不同的外观模板。
 * **用户标识格式**: 可持久化设定好友名称的显示格式（如备注、昵称、QQ号或自定义模板）。
+* **文件头信息**: 可选择是否在每个导出文件的开头添加一份包含导出范围、时间、数据库校验和等信息的摘要。
 * **内容显示开关**:
     * 是否显示撤回提示（支持个性化后缀）。
     * 是否显示“拍一拍”、“戳一戳”等互动提示。
     * 是否显示语音消息的转录文本。
     * 是否显示图片/视频的尺寸和时长等详细信息（默认关闭）。
+
+#### HTML 模板
+
+仓库中存放了基础模板 `default.html` 以及少量的预设模板，提供丰富的 css 类以及元素嵌套，皆可在最大程度上进行模板创作。
+
+欢迎提交 pull request！
 
 #### 消息解析详情
 
@@ -105,7 +108,7 @@ bash /storage/emulated/0/QQRootFastDecrypt/qqnt_decrypt.sh
     * **表情**: 覆盖多种类型，如 `[QQ表情: 捂脸]`、`[动画表情]`、`[商城表情]`(显示为表情描述)、`[超级QQ秀: 七夕快乐]` 以及 `[互动表情: 比心]`、`[平底锅]x99` 等。
 * **多媒体**: `[视频]` 可显示尺寸和时长，`[文件]` 可显示完整文件名。
 * **卡片与分享**: 支持位置卡片（显示地点与地址）、音乐分享（显示歌名与作者）、文件、小程序、名片和合并转发的聊天记录。
-* **系统与互动**: 能正确显示撤回、拍一-拍/戳一戳、位置共享状态等。
+* **系统与互动**: 能正确显示撤回、拍一拍/戳一戳、位置共享状态等。
 * **引用消息**: 能够正确显示包括互动表情在内的各类复杂消息的原文摘要。
 
 ## 其他工具
