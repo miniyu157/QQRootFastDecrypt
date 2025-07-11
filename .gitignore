@@ -1,6 +1,5 @@
 *
 
-!/.git
 !/.gitignore
 !/README.md
 !/CHANGELOG.md
@@ -9,3 +8,6 @@
 !/export_chats.py
 !/get_qqnt_key.sh
 !/sqlite_to_json.py
+
+!/html_templates/
+!/html_templates/**

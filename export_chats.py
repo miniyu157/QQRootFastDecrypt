@@ -24,6 +24,7 @@ import json
 import argparse
 import warnings
 import hashlib
+import html
 
 # 忽略 google.protobuf 的 pkg_resources DEPRECATED 警告
 # 这是 protobuf 库的一个已知问题，与本脚本功能无关
@@ -45,6 +46,7 @@ _DB_FILENAME = "nt_msg.decrypt.db"  # 解密后的QQ聊天记录数据库文件�
 _PROFILE_DB_FILENAME = "profile_info.decrypt.db"  # 主人信息及好友列表数据库
 _OUTPUT_DIR_NAME = "output_chats"  # 默认的顶层输出文件夹名
 _CONFIG_FILENAME = "export_config.json" # 导出配置
+_TEMPLATE_DIR_NAME = "html_templates" # HTML模板文件夹
 _TIMELINE_FILENAME_BASE = "chat_logs_timeline" # 全局时间线文件名前缀
 _FRIENDS_LIST_FILENAME = "friends_list.txt" # 好友信息列表文件名
 _ALL_USERS_LIST_FILENAME = "all_cached_users_list.txt" # 全部用户信息列表文件名
@@ -54,6 +56,7 @@ DB_PATH = ""
 PROFILE_DB_PATH = ""
 OUTPUT_DIR = ""
 CONFIG_PATH = ""
+TEMPLATE_DIR_PATH = ""
 
 
 # 【核心数据结构缓存】
@@ -150,7 +153,8 @@ class ConfigManager:
             'show_recall_suffix': True,
             'show_poke': True,
             'show_voice_to_text': True,
-            'export_markdown': True,
+            'export_format': 'md',
+            'html_template': 'default.html',
             'show_media_info': False,
             'name_style': 'default',
             'name_format': '',
@@ -166,6 +170,14 @@ class ConfigManager:
                     loaded_config = json.load(f)
                 config = self.default_config.copy()
                 config.update(loaded_config)
+                # 兼容旧版配置
+                if 'export_markdown' in config:
+                    if config['export_markdown']:
+                        config['export_format'] = 'md'
+                    else:
+                        config['export_format'] = 'txt'
+                    del config['export_markdown']
+
                 return config
             except (json.JSONDecodeError, TypeError):
                 print(f"警告: 配置文件 '{self.config_path}' 格式错误，将使用默认配置。")
@@ -290,9 +302,9 @@ class ProfileManager:
             )
         return default_name
 
-    def get_filename(self, uid, timestamp_str, use_markdown=False):
+    def get_filename(self, uid, timestamp_str, export_format='md'):
         """为一对一聊天记录生成标准的文件名，并附加时间戳。"""
-        ext = ".md" if use_markdown else ".txt"
+        ext = f".{export_format}"
         user = self.user_info.get(uid)
         if not user: return f"{uid}{timestamp_str}{ext}"
         
@@ -710,34 +722,29 @@ def decode_message_content(content, timestamp, profile_mgr, name_style, name_for
         SALVAGE_CACHE[timestamp] = b64
         return [b64]
 
-def _generate_file_header(config: dict, rows: list, scope_info: dict) -> str:
-    """根据导出配置和范围，动态生成文件头字符串"""
+def _generate_text_header(config: dict, rows: list, scope_info: dict) -> str:
+    """根据导出配置和范围，动态生成用于TXT/MD的文件头字符串"""
     if not config['export_config'].get('add_file_header', False) or not rows:
         return ""
         
     profile_mgr = config['profile_mgr']
     
-    # 1. 计算文件哈希
     msg_db_hash = _calculate_sha256(DB_PATH)
     profile_db_hash = _calculate_sha256(PROFILE_DB_PATH)
-
-    # 2. 格式化时间
     gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     start_time = format_timestamp(rows[0][0])
     end_time = format_timestamp(rows[-1][0])
 
-    # 3. 获取主人信息 (使用原始昵称)
     my_info = profile_mgr.user_info.get(profile_mgr.my_uid, {})
     master_name = my_info.get('nickname', '未知')
     master_qq = my_info.get('qq', '未知')
     
-    # 4. 生成好友范围文本
     scope_text = "未知范围"
     scope_type = scope_info.get('type')
     if scope_type == 'individual':
         friend_uid = scope_info['friend_uid']
         friend_info = profile_mgr.user_info.get(friend_uid, {})
-        friend_nick = friend_info.get('nickname', friend_uid) # 使用原始昵称
+        friend_nick = friend_info.get('nickname', friend_uid)
         friend_remark = friend_info.get('remark')
         remark_str = f" ({friend_remark})" if friend_remark else ""
         scope_text = f"{master_name} 与 {friend_nick}{remark_str} 的聊天"
@@ -758,22 +765,19 @@ def _generate_file_header(config: dict, rows: list, scope_info: dict) -> str:
             else:
                 scope_text = f'{"、".join(nicks[:5])} 等{len(nicks)}人'
 
-    # 5. 获取用户标识风格文本
     style_map = {'default': "昵称/备注", 'nickname': "昵称", 'qq': "QQ号码", 'uid': "UID", 'custom': "组合标识"}
     identifier_style_text = style_map.get(config['name_style'], "未知")
 
-    # 6. 生成动态提示文本
     included_features = []
     cfg = config['export_config']
     if cfg.get('show_recall'): included_features.append("撤回提示")
     if cfg.get('show_poke'): included_features.append("拍一拍/戳一戳")
     if cfg.get('show_voice_to_text'): included_features.append("语音转文字")
-    hint_text = "此文件由工具自动生成。记录包含文本、图片、引用"
+    hint_text = "此文件由脚本自动生成。记录包含文本、图片、引用"
     if included_features:
         hint_text += f"、{'、'.join(included_features)}"
     hint_text += "等消息。部分Ark卡片、系统消息和未知类型的消息可能被简化或忽略，旨在尽可能还原原始对话顺序和内容。"
 
-    # 7. 组装完整的文件头
     header = (
         "QQ 聊天记录归档\n\n"
         "数据来源:\n"
@@ -789,6 +793,93 @@ def _generate_file_header(config: dict, rows: list, scope_info: dict) -> str:
         f"{'-'*40}\n\n"
     )
     return header
+
+def _generate_html_header(config: dict, rows: list, scope_info: dict) -> str:
+    """根据导出配置和范围，动态生成文件头的HTML字符串"""
+    if not config['export_config'].get('add_file_header', False) or not rows:
+        return ""
+        
+    profile_mgr = config['profile_mgr']
+    
+    # 修复 `AttributeError` 的关键：确保所有数据在 escape 前都是字符串
+    # 使用 unescape 防止双重转义，修正 ✨&gt;猫猫&lt;✨ 这类问题
+    def safe_escape(value):
+        return html.escape(html.unescape(str(value)))
+
+    msg_db_hash = _calculate_sha256(DB_PATH)
+    profile_db_hash = _calculate_sha256(PROFILE_DB_PATH)
+    gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    start_time = format_timestamp(rows[0][0])
+    end_time = format_timestamp(rows[-1][0])
+
+    my_info = profile_mgr.user_info.get(profile_mgr.my_uid, {})
+    master_name = my_info.get('nickname', '未知')
+    master_qq = my_info.get('qq', '未知')
+    
+    scope_text = "未知范围"
+    scope_type = scope_info.get('type')
+    if scope_type == 'individual':
+        friend_uid = scope_info['friend_uid']
+        friend_info = profile_mgr.user_info.get(friend_uid, {})
+        friend_nick = friend_info.get('nickname', friend_uid)
+        friend_remark = friend_info.get('remark')
+        remark_str = f" ({safe_escape(friend_remark)})" if friend_remark else ""
+        scope_text = f"{safe_escape(master_name)} 与 {safe_escape(friend_nick)}{remark_str} 的聊天"
+    elif scope_type == 'timeline':
+        selection_mode = scope_info['selection_mode']
+        if selection_mode in ['all_friends', 'all_groups']:
+            scope_text = "全部好友"
+        elif selection_mode == 'group':
+            gid = scope_info['details']['gid']
+            gname = profile_mgr.group_info.get(gid, f"分组_{gid}")
+            count = scope_info['details']['count']
+            scope_text = f'分组"{safe_escape(gname)}" ({count}人)'
+        elif selection_mode == 'selected_friends':
+            uids = scope_info['details']['uids']
+            nicks = [safe_escape(profile_mgr.user_info.get(uid, {}).get('nickname', uid)) for uid in uids]
+            if len(nicks) <= 5:
+                scope_text = "、".join(nicks)
+            else:
+                scope_text = f'{"、".join(nicks[:5])} 等{len(nicks)}人'
+
+    style_map = {'default': "昵称/备注", 'nickname': "昵称", 'qq': "QQ号码", 'uid': "UID", 'custom': "组合标识"}
+    identifier_style_text = style_map.get(config['name_style'], "未知")
+
+    included_features = []
+    cfg = config['export_config']
+    if cfg.get('show_recall'): included_features.append("撤回提示")
+    if cfg.get('show_poke'): included_features.append("拍一拍/戳一戳")
+    if cfg.get('show_voice_to_text'): included_features.append("语音转文字")
+    hint_text = "此文件由脚本自动生成。记录包含文本、图片、引用"
+    if included_features:
+        hint_text += f"、{'、'.join(included_features)}"
+    hint_text += "等消息。部分Ark卡片、系统消息和未知类型的消息可能被简化或忽略，旨在尽可能还原原始对话顺序和内容。"
+
+    # 生成更具结构化的HTML文件头
+    header_html = (
+        '<div class="header">\n'
+        '    <h1>QQ 聊天记录归档</h1>\n'
+        '    <div class="header-group data-source">\n'
+        '        <p><strong>数据来源:</strong></p>\n'
+        f'        <p>- nt_msg.decrypt.db (sha256): <code>{msg_db_hash}</code></p>\n'
+        f'        <p>- profile_info.decrypt.db (sha256): <code>{profile_db_hash}</code></p>\n'
+        '    </div>\n'
+        '    <div class="header-group time-info">\n'
+        f'        <p><strong>文件生成时间:</strong> {gen_time}</p>\n'
+        f'        <p><strong>记录开始时间:</strong> {start_time}</p>\n'
+        f'        <p><strong>记录结束时间:</strong> {end_time}</p>\n'
+        '    </div>\n'
+        '    <div class="header-group scope-info">\n'
+        f'        <p><strong>主人账号:</strong> {safe_escape(master_name)} ({safe_escape(master_qq)})</p>\n'
+        f'        <p><strong>好友范围:</strong> {scope_text}</p>\n'
+        f'        <p><strong>用户标识:</strong> {identifier_style_text}</p>\n'
+        '    </div>\n'
+        '    <div class="header-group hint-info">\n'
+        f'        <p><strong>提示:</strong> {html.escape(hint_text)}</p>\n'
+        '    </div>\n'
+        '</div>'
+    )
+    return header_html
 
 # --- 用户交互与选择 ---
 def select_export_mode():
@@ -821,6 +912,67 @@ def select_export_mode():
             return int(choice)
         exit(1)
 
+def select_export_format(path_title: str, current_format: str) -> str:
+    """让用户选择导出格式。"""
+    print(f"\n--- {path_title} ---")
+    formats = {'1': 'txt', '2': 'md', '3': 'html'}
+    descs = {'1': "纯文本 (.txt)", '2': "Markdown (.md) [默认]", '3': "网页文件 (.html)"}
+    
+    print(f"当前格式: {current_format.upper()}")
+    for k, v in descs.items():
+        print(f"  {k}. {v}")
+    
+    while True:
+        choice = input("请输入选项序号 (1-3, 直接回车使用默认值 'md'): ").strip()
+        if not choice:
+            return 'md'
+        if choice in formats:
+            return formats[choice]
+        print("  -> 无效输入，请重试。")
+
+def select_html_template(path_title: str, current_template_in_config: str) -> str:
+    """让用户从html_templates文件夹中选择一个HTML模板，并处理模板不存在的情况。"""
+    print(f"\n--- {path_title} ---")
+    
+    if not os.path.isdir(TEMPLATE_DIR_PATH):
+        print(f"错误：模板文件夹 '{TEMPLATE_DIR_PATH}' 不存在。无法进行HTML导出。")
+        print(f"请在脚本同目录下创建 '{_TEMPLATE_DIR_NAME}' 文件夹并放入.html模板文件。")
+        input("按回车键返回...")
+        return current_template_in_config
+
+    try:
+        available_templates = sorted([f.name for f in os.scandir(TEMPLATE_DIR_PATH) if f.name.endswith('.html')])
+    except OSError as e:
+        print(f"错误：无法读取模板文件夹 '{TEMPLATE_DIR_PATH}': {e}")
+        input("按回车键返回...")
+        return current_template_in_config
+
+    if not available_templates:
+        print(f"警告：在 '{TEMPLATE_DIR_PATH}' 中没有找到任何.html模板文件。无法进行HTML导出。")
+        input("按回车键返回...")
+        return current_template_in_config
+
+    # 验证当前配置的模板是否有效，如果无效则回退
+    effective_template = current_template_in_config
+    if effective_template not in available_templates:
+        print(f"警告：配置文件中指定的模板 '{effective_template}' 不存在。")
+        effective_template = available_templates[0]
+        print(f"      已自动回退至模板: '{effective_template}'")
+    
+    print("请选择一个HTML模板:")
+    choices = {str(i + 1): name for i, name in enumerate(available_templates)}
+    for i, name in enumerate(available_templates):
+        marker = " [当前选用]" if name == effective_template else ""
+        print(f"  {i+1}. {name}{marker}")
+
+    while True:
+        choice_str = input(f"请输入选项序号 (1-{len(available_templates)}), 或直接回车确认当前选用: ").strip()
+        if not choice_str:
+            return effective_template
+        if choice_str in choices:
+            return choices[choice_str]
+        print("  -> 无效输入，请重试。")
+
 def manage_export_config(path_title, config_mgr):
     """管理导出配置的交互菜单"""
     temp_config = config_mgr.config.copy()
@@ -828,36 +980,30 @@ def manage_export_config(path_title, config_mgr):
     while True:
         print(f"\n--- {path_title} ---")
         
-        # 定义内容格式化选项
         content_options = {
-            '1': ('show_recall', "撤回提示"),
-            '2': ('show_recall_suffix', "个性化撤回提示"),
-            '3': ('show_poke', "戳一戳/拍一拍提示"),
-            '4': ('show_voice_to_text', "语音转换文本"),
+            '1': ('show_recall', "撤回提示"), '2': ('show_recall_suffix', "个性化撤回提示"),
+            '3': ('show_poke', "戳一戳/拍一拍提示"), '4': ('show_voice_to_text', "语音转换文本"),
             '5': ('show_media_info', "媒体显示尺寸等信息")
         }
-        
         print("> 内容格式")
-        for key, (config_key, label) in content_options.items():
-            status = "开" if temp_config.get(config_key) else "关"
-            print(f"  {key}. [{status}] {label}")
+        for k, (cfg_key, lbl) in content_options.items():
+            print(f"  {k}. [{'开' if temp_config.get(cfg_key) else '关'}] {lbl}")
 
-        # 定义其他设置
         other_options = {
-            '6': ('export_markdown', "输出为 Markdown (.md)"),
-            '7': ('name_style', "用户标识格式"),
-            '8': ('add_file_header', "添加文件头")
+            '6': ('export_format', "导出格式"), '7': ('name_style', "用户标识格式"),
+            '8': ('add_file_header', "添加文件头"), '9': ('html_template', "HTML模板")
         }
-        
         print("> 其他设置")
-        for key, (config_key, label) in other_options.items():
-            if config_key == 'name_style':
-                current_style = temp_config.get(config_key, 'default')
+        for k, (cfg_key, lbl) in other_options.items():
+            if cfg_key == 'name_style':
                 style_map = {'default': "备注/昵称", 'nickname': "昵称", 'qq': "QQ号", 'uid': "UID", 'custom': "自定义"}
-                print(f"  {key}. {label}: [{style_map.get(current_style, '未知')}]")
+                print(f"  {k}. {lbl}: [{style_map.get(temp_config.get(cfg_key, 'default'), '未知')}]")
+            elif cfg_key == 'export_format':
+                print(f"  {k}. {lbl}: [{temp_config.get(cfg_key, 'md').upper()}]")
+            elif cfg_key == 'html_template':
+                print(f"  {k}. {lbl}: [{temp_config.get(cfg_key, 'default.html')}]")
             else:
-                status = "开" if temp_config.get(config_key) else "关"
-                print(f"  {key}. [{status}] {label}")
+                print(f"  {k}. [{'开' if temp_config.get(cfg_key) else '关'}] {lbl}")
 
         choice_str = input("请输入要操作的选项序号 (可多选，如 123)，回车键保存并返回: ").strip()
 
@@ -868,24 +1014,23 @@ def manage_export_config(path_title, config_mgr):
         
         selected_keys = re.findall(r'\d', choice_str)
         toggled = False
+        all_options = {**content_options, **other_options}
         for key in selected_keys:
-            if key in content_options:
-                config_key = content_options[key][0]
-                temp_config[config_key] = not temp_config[config_key]
-                toggled = True
-            elif key in other_options:
-                config_key = other_options[key][0]
+            if key in all_options:
+                config_key, label = all_options[key]
                 if config_key == 'name_style':
-                     style, fmt = select_name_style(f"{path_title} > {other_options[key][1]}")
-                     temp_config['name_style'] = style
-                     temp_config['name_format'] = fmt
+                    style, fmt = select_name_style(f"{path_title} > {label}")
+                    temp_config['name_style'], temp_config['name_format'] = style, fmt
+                elif config_key == 'export_format':
+                    temp_config['export_format'] = select_export_format(f"{path_title} > {label}", temp_config.get(config_key, 'md'))
+                elif config_key == 'html_template':
+                    temp_config['html_template'] = select_html_template(f"{path_title} > {label}", temp_config.get(config_key, 'default.html'))
                 else:
-                    temp_config[config_key] = not temp_config[config_key]
+                    temp_config[config_key] = not temp_config.get(config_key)
                 toggled = True
 
         if not toggled:
             break
-
 
 def select_user_list_mode(path_title):
     """让用户选择导出用户列表的范围。"""
@@ -1008,123 +1153,261 @@ def select_group(profile_mgr, path_title):
         return None # 无效输入则返回
 
 # --- 导出执行逻辑 ---
-def process_and_write(output_path, rows, profile_mgr, config, header_content=""):
-    """将查询到的数据库行处理并写入文件，支持txt和markdown两种格式。"""
-    is_markdown = config['export_config'].get('export_markdown', False)
+def _write_txt(f, rows, profile_mgr, config):
+    """将聊天记录写入纯文本文件"""
+    # ... (此函数内容未改变)
+    name_style = config.get('name_style', 'default')
+    name_format = config.get('name_format', '')
+    count = 0
+    for row in rows:
+        ts, s_uid, p_uid, content = row
+        parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
+        if not parts: continue
+        
+        is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
+        text = " ".join(str(p) for p in parts if not isinstance(p, dict))
+        
+        if not is_reply:
+            MESSAGE_CONTENT_CACHE[ts] = text
+        else:
+            pattern = r'\[引用->(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)\]'
+            replacement = r'[引用-> [\1] \2 <-]'
+            text = re.sub(pattern, replacement, text, count=1)
+
+        time = format_timestamp(ts)
+        first = parts[0]
+        if isinstance(first, dict) and first.get("type") == "interactive_tip":
+            body = f"{first['actor']} {first['verb']} {first['target']}{first['suffix']}"
+            line = f"[{time}] [系统提示]: {body}\n"
+        else:
+            sender = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
+            if sender == "N/A": sender = "[系统提示]"
+            if config['is_timeline']:
+                if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
+                receiver = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
+                line = f"[{time}] {sender} -> {receiver}: {text}\n"
+            else: line = f"[{time}] {sender}: {text}\n"
+        f.write(line)
+        count += 1
+    return count
+
+def _write_md(f, rows, profile_mgr, config):
+    """将聊天记录写入Markdown文件"""
+    # ... (此函数内容未改变)
+    name_style = config.get('name_style', 'default')
+    name_format = config.get('name_format', '')
+    count = 0
+    last_date = None
+    last_sender_key = None
+    last_element_was_quote = False # 状态追踪变量
+    
+    for row in rows:
+        ts, s_uid, p_uid, content = row
+        parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
+        if not parts: continue
+        
+        dt_object = datetime.fromtimestamp(ts)
+        current_date = dt_object.strftime("%Y-%m-%d")
+        current_time = dt_object.strftime("%H:%M:%S")
+
+        sender_display = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
+        if sender_display == "N/A":
+            sender_key = "[系统提示]"
+        elif config['is_timeline']:
+            if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
+            receiver_display = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
+            sender_key = f"{sender_display} -> {receiver_display}"
+        else:
+            sender_key = sender_display
+
+        if current_date != last_date:
+            if last_date is not None:
+                if not last_element_was_quote:
+                    f.write(f"\n")
+            f.write(f"# {current_date}\n")
+            last_date = current_date
+            last_sender_key = None
+            last_element_was_quote = False
+        
+        if sender_key != last_sender_key:
+            if not last_element_was_quote:
+                f.write(f"\n")
+            f.write(f"### {sender_key}\n")
+            last_sender_key = sender_key
+            last_element_was_quote = False
+
+        main_text_parts = []
+        quote_content = ""
+        is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
+        
+        if not is_reply and isinstance(parts[0], dict) and parts[0].get("type") == "interactive_tip":
+            tip = parts[0]
+            main_text_parts.append(f"{tip['actor']} {tip['verb']} {tip['target']}{tip['suffix']}")
+        else:
+            for p in parts:
+                p_str = str(p)
+                match = re.search(r'\[引用->(.*)\]', p_str)
+                if match:
+                    quote_content = match.group(1)
+                else:
+                    main_text_parts.append(p_str)
+        
+        main_text = " ".join(main_text_parts)
+        
+        if not is_reply:
+            MESSAGE_CONTENT_CACHE[ts] = main_text
+
+        if sender_key == "[系统提示]" and main_text.startswith('[') and main_text.endswith(']'):
+                main_text = main_text[1:-1]
+
+        f.write(f"* {current_time} {main_text}\n")
+        if quote_content:
+            f.write(f"  > {quote_content}\n\n")
+            last_element_was_quote = True
+        else:
+            last_element_was_quote = False
+        
+        count += 1
+    return count
+
+def _write_html(f, rows, profile_mgr, config, scope_info):
+    """将聊天记录写入HTML文件"""
+    template_filename = config['export_config'].get('html_template', 'default.html')
+    template_path = os.path.join(TEMPLATE_DIR_PATH, template_filename)
+
+    try:
+        with open(template_path, 'r', encoding='utf-8') as tpl_f:
+            template_str = tpl_f.read()
+    except FileNotFoundError:
+        print(f"\n错误：HTML模板文件 '{template_path}' 未找到。请确保它存在于 '{TEMPLATE_DIR_PATH}' 文件夹中。")
+        f.write(f"<h1>错误</h1><p>HTML模板文件 '{template_filename}' 未在 '{TEMPLATE_DIR_PATH}' 文件夹中找到。</p>")
+        return 0
+    except Exception as e:
+        print(f"\n错误：读取HTML模板文件时出错: {e}")
+        f.write(f"<h1>错误</h1><p>读取HTML模板文件时出错: {e}</p>")
+        return 0
+
     name_style = config.get('name_style', 'default')
     name_format = config.get('name_format', '')
     
+    def safe_escape(value):
+        return html.escape(html.unescape(str(value)))
+
+    # 1. 生成文件头HTML
+    header_html = _generate_html_header(config, rows, scope_info)
+
+    # 2. 生成聊天内容主体HTML
+    content_html_parts = []
+    last_date = None
+    last_sender_key = None
+    
+    def close_open_tags():
+        if last_sender_key is not None:
+            content_html_parts.append('</div></div>') 
+        if last_date is not None:
+            content_html_parts.append('</div></details>')
+
+    for row in rows:
+        ts, s_uid, p_uid, content = row
+        parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
+        if not parts: continue
+        
+        dt_object = datetime.fromtimestamp(ts)
+        current_date = dt_object.strftime("%Y-%m-%d")
+        current_time = dt_object.strftime("%H:%M:%S")
+
+        sender_display = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
+        if sender_display == "N/A":
+            sender_key = "[系统提示]"
+        elif config['is_timeline']:
+            if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
+            receiver_display = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
+            sender_key = f"{sender_display} -> {receiver_display}"
+        else:
+            sender_key = sender_display
+
+        if current_date != last_date:
+            close_open_tags()
+            content_html_parts.append(f'<details class="date-block"><summary>{current_date}</summary><div class="chat-day-content">')
+            last_date = current_date
+            last_sender_key = None
+        
+        if sender_key != last_sender_key:
+            if last_sender_key is not None:
+                content_html_parts.append('</div></div>')
+            
+            speaker_class = "is-self" if s_uid == profile_mgr.my_uid else "is-other"
+            
+            if sender_key == "[系统提示]":
+                content_html_parts.append('<div class="system-message-container"><div class="message-block">')
+            else:
+                content_html_parts.append(f'<div class="sender-message-group {speaker_class}">')
+                content_html_parts.append(f'<div class="sender">{safe_escape(sender_key)}</div>')
+                content_html_parts.append('<div class="message-block">')
+            last_sender_key = sender_key
+
+        main_text_parts = []
+        quote_content = ""
+        is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
+
+        if not is_reply and isinstance(parts[0], dict) and parts[0].get("type") == "interactive_tip":
+            tip = parts[0]
+            actor = safe_escape(tip['actor'])
+            verb = safe_escape(tip['verb'])
+            target = safe_escape(tip['target'])
+            suffix = safe_escape(tip['suffix'])
+            main_text_parts.append(f"{actor} {verb} {target}{suffix}")
+        else:
+            for p in parts:
+                p_str = str(p)
+                match = re.search(r'\[引用->(.*)\]', p_str)
+                if match:
+                    quote_content = match.group(1)
+                else:
+                    main_text_parts.append(p_str)
+        
+        main_text = " ".join(main_text_parts)
+        if not is_reply:
+            MESSAGE_CONTENT_CACHE[ts] = main_text
+
+        escaped_main_text = safe_escape(main_text).replace('[%\\n%]', '<br>')
+        
+        if sender_key == "[系统提示]":
+             if escaped_main_text.startswith('[') and escaped_main_text.endswith(']'):
+                 escaped_main_text = escaped_main_text[1:-1]
+             content_html_parts.append(f'<div class="sys-message">{escaped_main_text}</div>')
+        else:
+            content_html_parts.append(f'<div class="message-item"><span class="timestamp">{current_time}</span><span class="message-content">{escaped_main_text}</span></div>')
+
+        if quote_content:
+            escaped_quote = safe_escape(quote_content).replace('[%\\n%]', '<br>')
+            content_html_parts.append(f'<div class="reply-container"><blockquote>{escaped_quote}</blockquote></div>')
+
+    close_open_tags()
+    
+    final_html = template_str.replace('{{file_header}}', header_html)
+    final_html = final_html.replace('{{chat_content}}', '\n'.join(content_html_parts))
+
+    f.write(final_html)
+    return len(rows)
+
+def process_and_write(output_path, rows, profile_mgr, config, scope_info):
+    """将查询到的数据库行处理并写入文件，支持txt、md、html三种格式。"""
+    export_format = config['export_config'].get('export_format', 'md')
     count = 0
     with open(output_path, "w", encoding="utf-8") as f:
-        if header_content:
-            f.write(header_content)
-
-        if is_markdown:
-            last_date = None
-            last_sender_key = None
-            last_element_was_quote = False # 状态追踪变量
+        if export_format == 'html':
+            count = _write_html(f, rows, profile_mgr, config, scope_info)
+        else:
+            header_content = _generate_text_header(config, rows, scope_info)
+            if header_content:
+                f.write(header_content)
             
-            for row in rows:
-                ts, s_uid, p_uid, content = row
-                parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
-                if not parts: continue
-                
-                dt_object = datetime.fromtimestamp(ts)
-                current_date = dt_object.strftime("%Y-%m-%d")
-                current_time = dt_object.strftime("%H:%M:%S")
-
-                sender_display = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
-                if sender_display == "N/A":
-                    sender_key = "[系统提示]"
-                elif config['is_timeline']:
-                    if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
-                    receiver_display = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
-                    sender_key = f"{sender_display} -> {receiver_display}"
-                else:
-                    sender_key = sender_display
-
-                # --- 标题写入逻辑 ---
-                if current_date != last_date:
-                    if last_date is not None:
-                        if not last_element_was_quote:
-                            f.write(f"\n")
-                    f.write(f"# {current_date}\n")
-                    last_date = current_date
-                    last_sender_key = None
-                    last_element_was_quote = False
-                
-                if sender_key != last_sender_key:
-                    if not last_element_was_quote:
-                        f.write(f"\n")
-                    f.write(f"### {sender_key}\n")
-                    last_sender_key = sender_key
-                    last_element_was_quote = False
-
-                # --- 消息解析与写入逻辑 ---
-                main_text_parts = []
-                quote_content = ""
-                is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
-                
-                if not is_reply and isinstance(parts[0], dict) and parts[0].get("type") == "interactive_tip":
-                    tip = parts[0]
-                    main_text_parts.append(f"{tip['actor']} {tip['verb']} {tip['target']}{tip['suffix']}")
-                else:
-                    for p in parts:
-                        p_str = str(p)
-                        match = re.search(r'\[引用->(.*)\]', p_str)
-                        if match:
-                            quote_content = match.group(1)
-                        else:
-                            main_text_parts.append(p_str)
-                
-                main_text = " ".join(main_text_parts)
-                
-                if not is_reply:
-                    MESSAGE_CONTENT_CACHE[ts] = main_text
-
-                if sender_key == "[系统提示]" and main_text.startswith('[') and main_text.endswith(']'):
-                     main_text = main_text[1:-1]
-    
-                f.write(f"* {current_time} {main_text}\n")
-                if quote_content:
-                    f.write(f"  > {quote_content}\n\n")
-                    last_element_was_quote = True
-                else:
-                    last_element_was_quote = False
-                
-                count += 1
-
-        else: # 非Markdown模式的逻辑
-            for row in rows:
-                ts, s_uid, p_uid, content = row
-                parts = decode_message_content(content, ts, profile_mgr, name_style, name_format, config['export_config'], config['is_timeline'])
-                if not parts: continue
-                
-                is_reply = isinstance(parts[0], str) and parts[0].startswith('[引用->')
-                text = " ".join(str(p) for p in parts if not isinstance(p, dict))
-                
-                if not is_reply:
-                    MESSAGE_CONTENT_CACHE[ts] = text
-                else:
-                    pattern = r'\[引用->(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (.*)\]'
-                    replacement = r'[引用-> [\1] \2 <-]'
-                    text = re.sub(pattern, replacement, text, count=1)
-
-                time = format_timestamp(ts)
-                first = parts[0]
-                if isinstance(first, dict) and first.get("type") == "interactive_tip":
-                    body = f"{first['actor']} {first['verb']} {first['target']}{first['suffix']}"
-                    line = f"[{time}] [系统提示]: {body}\n"
-                else:
-                    sender = profile_mgr.get_display_name(get_placeholder(s_uid), name_style, name_format)
-                    if sender == "N/A": sender = "[系统提示]"
-                    if config['is_timeline']:
-                        if get_placeholder(s_uid) == get_placeholder(p_uid): p_uid = profile_mgr.my_uid
-                        receiver = profile_mgr.get_display_name(get_placeholder(p_uid), name_style, name_format)
-                        line = f"[{time}] {sender} -> {receiver}: {text}\n"
-                    else: line = f"[{time}] {sender}: {text}\n"
-                f.write(line)
-                count += 1
+            if export_format == 'md':
+                count = _write_md(f, rows, profile_mgr, config)
+            else: # 默认为 txt
+                count = _write_txt(f, rows, profile_mgr, config)
+            
     return count
 
 def export_timeline(db_con, config, target_uids, scope_info):
@@ -1160,17 +1443,15 @@ def export_timeline(db_con, config, target_uids, scope_info):
         print("查询完成，但未能获取任何记录。")
         return
         
-    ext = ".md" if export_config.get('export_markdown') else ".txt"
+    ext = f".{export_config.get('export_format', 'md')}"
     timeline_dir = os.path.join(OUTPUT_DIR, "Timeline")
     os.makedirs(timeline_dir, exist_ok=True)
     filename = f"{_TIMELINE_FILENAME_BASE}{run_timestamp}{ext}"
     path = os.path.join(timeline_dir, filename)
     
-    header = _generate_file_header(config, rows, scope_info)
-
     process_config = config.copy()
     process_config['is_timeline'] = True
-    count = process_and_write(path, rows, profile_mgr, process_config, header)
+    count = process_and_write(path, rows, profile_mgr, process_config, scope_info)
     print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
 
 def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, index=None, total=None):
@@ -1208,14 +1489,12 @@ def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, inde
 
     output_dir = out_dir or os.path.join(OUTPUT_DIR, "Individual")
     os.makedirs(output_dir, exist_ok=True)
-    filename = profile_mgr.get_filename(friend_uid, run_timestamp, export_config.get('export_markdown'))
+    filename = profile_mgr.get_filename(friend_uid, run_timestamp, export_config.get('export_format', 'md'))
     path = os.path.join(output_dir, filename)
-    
-    header = _generate_file_header(config, rows, scope_info)
-    
+        
     process_config = config.copy()
     process_config['is_timeline'] = False
-    count = process_and_write(path, rows, profile_mgr, process_config, header)
+    count = process_and_write(path, rows, profile_mgr, process_config, scope_info)
     print(f"-> 共导出 {count} 条消息到 {path}")
 
 def export_user_list(profile_mgr, list_mode, timestamp_str):
@@ -1260,12 +1539,14 @@ def main():
     args = parser.parse_args()
 
     # 设置基础路径变量
-    global DB_PATH, PROFILE_DB_PATH, OUTPUT_DIR, CONFIG_PATH
+    global DB_PATH, PROFILE_DB_PATH, OUTPUT_DIR, CONFIG_PATH, TEMPLATE_DIR_PATH
     workdir = args.workdir
     script_dir = os.path.dirname(os.path.abspath(__file__))
     DB_PATH = os.path.join(workdir, _DB_FILENAME)
     PROFILE_DB_PATH = os.path.join(workdir, _PROFILE_DB_FILENAME)
     CONFIG_PATH = os.path.join(script_dir, _CONFIG_FILENAME)
+    TEMPLATE_DIR_PATH = os.path.join(script_dir, _TEMPLATE_DIR_NAME)
+
 
     print("===== QQ聊天记录导出工具 =====")
     print(f"当前工作目录: {os.path.abspath(workdir)}")
