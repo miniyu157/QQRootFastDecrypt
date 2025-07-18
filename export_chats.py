@@ -47,6 +47,7 @@ _PROFILE_DB_FILENAME = "profile_info.decrypt.db"  # 主人信息及好友列表�
 _OUTPUT_DIR_NAME = "output_chats"  # 默认的顶层输出文件夹名
 _CONFIG_FILENAME = "export_config.json" # 导出配置
 _TEMPLATE_DIR_NAME = "html_templates" # HTML模板文件夹
+_NON_FRIENDS_CACHE_FILENAME = "non_friends_cache.json" # 非好友UID缓存
 _TIMELINE_FILENAME_BASE = "chat_logs_timeline" # 全局时间线文件名前缀
 _FRIENDS_LIST_FILENAME = "friends_list.txt" # 好友信息列表文件名
 _ALL_USERS_LIST_FILENAME = "all_cached_users_list.txt" # 全部用户信息列表文件名
@@ -57,6 +58,7 @@ PROFILE_DB_PATH = ""
 OUTPUT_DIR = ""
 CONFIG_PATH = ""
 TEMPLATE_DIR_PATH = ""
+NON_FRIENDS_CACHE_PATH = ""
 
 
 # 【核心数据结构缓存】
@@ -153,6 +155,7 @@ class ConfigManager:
             'show_recall_suffix': True,
             'show_poke': True,
             'show_voice_to_text': True,
+            'export_non_friends': True,
             'export_format': 'md',
             'html_template': 'default.html',
             'show_media_info': False,
@@ -204,14 +207,15 @@ class ProfileManager:
         self.db_path = f"file:{db_path}?mode=ro"
         self.my_uid = ""
         self.my_qq = ""
-        self.user_info = {}   # {uid: {qq, nickname, remark, group_id, ...}} 好友信息
+        self.all_users = {}   # {uid: {qq, nickname, remark, group_id, ...}} # 包含所有好友和非好友
+        self.friend_uids = set() # 仅好友的UID集合，用于快速判断
+        self.non_friend_uids = [] # 非好友的UID列表
         self.group_info = {}  # {group_id: group_name} 分组信息
-        self.all_profiles_cache = {} # {uid: {qq, nickname, ...}} 所有缓存过的用户信息
 
     def load_data(self):
         """
         加载所有用户信息的总入口。
-        严格遵循 buddy_list 作为好友关系的唯一来源。
+        以 profile_info_v6 作为所有用户的基础信息来源，再用 buddy_list 补充好友特有信息。
         """
         print(f"\n正在从 '{os.path.basename(self.db_path.replace('file:', '').split('?')[0])}' 加载用户信息...")
         try:
@@ -219,11 +223,11 @@ class ProfileManager:
                 cur = con.cursor()
                 self._load_my_uid(cur)
                 self._load_groups(cur)
-                self._load_all_profiles_cache(cur)
-                self._build_friend_list()
-                if self.my_uid in self.all_profiles_cache:
-                    my_profile = self.all_profiles_cache[self.my_uid]
-                    self.user_info[self.my_uid] = my_profile
+                self._load_all_profiles(cur) # 先加载所有缓存用户
+                self._enrich_friends_info(cur) # 再用好友列表补充信息
+                
+                if self.my_uid in self.all_users:
+                    my_profile = self.all_users[self.my_uid]
                     self.my_qq = my_profile.get('qq', 'master')
                 
                 print("用户信息加载完毕。")
@@ -257,65 +261,126 @@ class ProfileManager:
             if group_id is not None and group_name:
                 self.group_info[group_id] = group_name
 
-    def _load_all_profiles_cache(self, cur):
-        """将profile_info_v6表的内容全部加载到字典，作为信息缓存。"""
+    def _load_all_profiles(self, cur):
+        """将profile_info_v6表的内容全部加载到字典，作为所有用户的信息基础。"""
         query = f'SELECT "{PROF_COL_UID}", "{PROF_COL_QQ}", "{PROF_COL_NICKNAME}", "{PROF_COL_REMARK}", "{PROF_COL_QID}", "{PROF_COL_SIGNATURE}" FROM {PROFILE_INFO_TABLE}'
         cur.execute(query)
         for uid, qq, nickname, remark, qid, signature in cur.fetchall():
-            self.all_profiles_cache[uid] = {
+            self.all_users[uid] = {
                 'qq': qq or uid, 'nickname': nickname or '', 'remark': remark or '', 
-                'qid': qid or '', 'signature': signature or '', 'group_id': -1
+                'qid': qid or '', 'signature': signature or '', 'is_friend': False, 'group_id': -1
             }
 
-    def _build_friend_list(self):
-        """以buddy_list为准，从all_profiles_cache中填充好友的详细信息。"""
-        with sqlite3.connect(self.db_path, uri=True) as con:
-            cur = con.cursor()
-            self.user_info = {}
-            query = f'SELECT "{PROF_COL_UID}", "{PROF_COL_QQ}", "{PROF_COL_GROUP_ID}" FROM {BUDDY_LIST_TABLE}'
-            cur.execute(query)
-            for friend_uid, friend_qq, friend_group_id in cur.fetchall():
-                profile_details = self.all_profiles_cache.get(friend_uid, {})
-                self.user_info[friend_uid] = {
-                    'qq': friend_qq or profile_details.get('qq', friend_uid),
-                    'nickname': profile_details.get('nickname', ''),
-                    'remark': profile_details.get('remark', ''),
-                    'qid': profile_details.get('qid', ''),
-                    'signature': profile_details.get('signature', ''),
-                    'group_id': friend_group_id if friend_group_id is not None else 0
+    def _enrich_friends_info(self, cur):
+        """以buddy_list为准，在all_users中补充好友的详细信息（如分组），并标记为好友。"""
+        query = f'SELECT "{PROF_COL_UID}", "{PROF_COL_QQ}", "{PROF_COL_GROUP_ID}" FROM {BUDDY_LIST_TABLE}'
+        cur.execute(query)
+        for friend_uid, friend_qq, friend_group_id in cur.fetchall():
+            self.friend_uids.add(friend_uid)
+            if friend_uid in self.all_users:
+                self.all_users[friend_uid]['is_friend'] = True
+                self.all_users[friend_uid]['group_id'] = friend_group_id if friend_group_id is not None else 0
+                if friend_qq: # buddy_list中的qq号可能更准
+                    self.all_users[friend_uid]['qq'] = friend_qq
+
+    def load_non_friends(self, config_mgr):
+        """扫描消息数据库，找出并缓存所有非好友的UID。"""
+        if not config_mgr.config.get('export_non_friends', True):
+            self.non_friend_uids = []
+            return
+
+        msg_db_hash = _calculate_sha256(DB_PATH)
+        profile_db_hash = _calculate_sha256(PROFILE_DB_PATH)
+
+        # 尝试从缓存加载
+        try:
+            if os.path.exists(NON_FRIENDS_CACHE_PATH):
+                with open(NON_FRIENDS_CACHE_PATH, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    if cache_data.get('msg_db_hash') == msg_db_hash and cache_data.get('profile_db_hash') == profile_db_hash:
+                        self.non_friend_uids = cache_data.get('uids', [])
+                        print(f"已从缓存加载 {len(self.non_friend_uids)} 个非好友/临时会话用户。")
+                        return
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"警告：读取非好友缓存文件失败，将重新扫描。错误：{e}")
+
+        # 缓存无效或不存在，重新扫描
+        print("正在扫描消息数据库以识别非好友/临时会话...")
+        if not os.path.exists(DB_PATH):
+            print(f"错误: 消息数据库文件 '{DB_PATH}' 不存在，无法扫描非好友。")
+            return
+            
+        all_peer_uids = set()
+        try:
+            with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as con:
+                cur = con.cursor()
+                cur.execute(f"SELECT DISTINCT `{COL_PEER_UID}` FROM {TABLE_NAME}")
+                rows = cur.fetchall()
+                for row in rows:
+                    if row[0]:
+                        all_peer_uids.add(row[0])
+        except sqlite3.Error as e:
+            print(f"错误: 扫描消息数据库时出错: {e}")
+            return
+        
+        potential_non_friends = all_peer_uids - self.friend_uids - {self.my_uid}
+        # 过滤掉没有昵称的非好友
+        valid_non_friends = [
+            uid for uid in potential_non_friends 
+            if self.all_users.get(uid, {}).get('nickname')
+        ]
+        
+        self.non_friend_uids = sorted(list(valid_non_friends))
+        print(f"扫描完成，发现 {len(self.non_friend_uids)} 个有效的非好友/临时会话用户。")
+
+        # 保存到缓存
+        try:
+            with open(NON_FRIENDS_CACHE_PATH, 'w', encoding='utf-8') as f:
+                cache_to_save = {
+                    'msg_db_hash': msg_db_hash,
+                    'profile_db_hash': profile_db_hash,
+                    'uids': self.non_friend_uids
                 }
+                json.dump(cache_to_save, f, indent=4)
+        except IOError as e:
+            print(f"警告: 无法写入非好友缓存文件。错误: {e}")
 
     def get_display_name(self, uid, style, custom_format=""):
         """根据用户选择的风格，获取一个UID对应的显示名称。"""
-        user = self.user_info.get(uid)
+        user = self.all_users.get(uid)
         if not user: return uid
         qq, nickname, remark = user.get('qq', uid), user.get('nickname', ''), user.get('remark', '')
-        default_name = remark or nickname or qq
+        default_name = remark or nickname or str(qq)
         
         if style == 'default': return default_name
-        if style == 'nickname': return nickname or qq
-        if style == 'qq': return qq
+        if style == 'nickname': return nickname or str(qq)
+        if style == 'qq': return str(qq)
         if style == 'uid': return uid
         if style == 'custom':
             return custom_format.format(
-                nickname=nickname or "N/A", remark=remark or "N/A", qq=qq, uid=uid
+                nickname=nickname or "N/A", remark=remark or "N/A", qq=str(qq), uid=uid
             )
         return default_name
 
     def get_filename(self, uid, timestamp_str, export_format='md'):
         """为一对一聊天记录生成标准的文件名，并附加时间戳。"""
         ext = f".{export_format}"
-        user = self.user_info.get(uid)
+        user = self.all_users.get(uid)
         if not user: return f"{uid}{timestamp_str}{ext}"
         
-        qq, nickname, remark = user.get('qq', uid), user.get('nickname', ''), user.get('remark', '')
+        qq = str(user.get('qq', uid))
+        nickname = user.get('nickname', '')
+        remark = user.get('remark', '')
         
+        # 核心逻辑修正与新增
         name_part = nickname or qq
         remark_part = f"(备注-{remark})" if remark else ""
-        safe_name_part = re.sub(r'[\\/*?:"<>|]', "", name_part)
-        safe_remark_part = re.sub(r'[\\/*?:"<>|]', "", remark_part)
+        is_non_friend_tag = "_[非好友]" if not user.get('is_friend', False) else ""
         
-        return f"{qq}_{safe_name_part}{safe_remark_part}{timestamp_str}{ext}"
+        safe_name_part = re.sub(r'[\\/*?:"<>|]', "_", name_part) or qq
+        safe_remark_part = re.sub(r'[\\/*?:"<>|]', "_", remark_part)
+        
+        return f"{qq}{is_non_friend_tag}_{safe_name_part}{safe_remark_part}{timestamp_str}{ext}"
 
 # --- 时间与文件处理函数 ---
 def _calculate_sha256(filepath):
@@ -735,7 +800,7 @@ def _generate_text_header(config: dict, rows: list, scope_info: dict) -> str:
     start_time = format_timestamp(rows[0][0])
     end_time = format_timestamp(rows[-1][0])
 
-    my_info = profile_mgr.user_info.get(profile_mgr.my_uid, {})
+    my_info = profile_mgr.all_users.get(profile_mgr.my_uid, {})
     master_name = my_info.get('nickname', '未知')
     master_qq = my_info.get('qq', '未知')
     
@@ -743,7 +808,7 @@ def _generate_text_header(config: dict, rows: list, scope_info: dict) -> str:
     scope_type = scope_info.get('type')
     if scope_type == 'individual':
         friend_uid = scope_info['friend_uid']
-        friend_info = profile_mgr.user_info.get(friend_uid, {})
+        friend_info = profile_mgr.all_users.get(friend_uid, {})
         friend_nick = friend_info.get('nickname', friend_uid)
         friend_remark = friend_info.get('remark')
         remark_str = f" ({friend_remark})" if friend_remark else ""
@@ -759,7 +824,7 @@ def _generate_text_header(config: dict, rows: list, scope_info: dict) -> str:
             scope_text = f'分组"{gname}" ({count}人)'
         elif selection_mode == 'selected_friends':
             uids = scope_info['details']['uids']
-            nicks = [profile_mgr.user_info.get(uid, {}).get('nickname', uid) for uid in uids]
+            nicks = [profile_mgr.all_users.get(uid, {}).get('nickname', uid) for uid in uids]
             if len(nicks) <= 5:
                 scope_text = "、".join(nicks)
             else:
@@ -812,7 +877,7 @@ def _generate_html_header(config: dict, rows: list, scope_info: dict) -> str:
     start_time = format_timestamp(rows[0][0])
     end_time = format_timestamp(rows[-1][0])
 
-    my_info = profile_mgr.user_info.get(profile_mgr.my_uid, {})
+    my_info = profile_mgr.all_users.get(profile_mgr.my_uid, {})
     master_name = my_info.get('nickname', '未知')
     master_qq = my_info.get('qq', '未知')
     
@@ -820,7 +885,7 @@ def _generate_html_header(config: dict, rows: list, scope_info: dict) -> str:
     scope_type = scope_info.get('type')
     if scope_type == 'individual':
         friend_uid = scope_info['friend_uid']
-        friend_info = profile_mgr.user_info.get(friend_uid, {})
+        friend_info = profile_mgr.all_users.get(friend_uid, {})
         friend_nick = friend_info.get('nickname', friend_uid)
         friend_remark = friend_info.get('remark')
         remark_str = f" ({safe_escape(friend_remark)})" if friend_remark else ""
@@ -836,7 +901,7 @@ def _generate_html_header(config: dict, rows: list, scope_info: dict) -> str:
             scope_text = f'分组"{safe_escape(gname)}" ({count}人)'
         elif selection_mode == 'selected_friends':
             uids = scope_info['details']['uids']
-            nicks = [safe_escape(profile_mgr.user_info.get(uid, {}).get('nickname', uid)) for uid in uids]
+            nicks = [safe_escape(profile_mgr.all_users.get(uid, {}).get('nickname', uid)) for uid in uids]
             if len(nicks) <= 5:
                 scope_text = "、".join(nicks)
             else:
@@ -980,41 +1045,45 @@ def manage_export_config(path_title, config_mgr):
     while True:
         print(f"\n--- {path_title} ---")
         
-        content_options = {
-            '1': ('show_recall', "撤回提示"), '2': ('show_recall_suffix', "个性化撤回提示"),
-            '3': ('show_poke', "戳一戳/拍一拍提示"), '4': ('show_voice_to_text', "语音转换文本"),
-            '5': ('show_media_info', "媒体显示尺寸等信息")
+        # 重新构建选项字典，使其有序且统一编号
+        all_options = {
+            '1': ('show_recall', "显示撤回提示"),
+            '2': ('show_recall_suffix', "显示个性化撤回提示"),
+            '3': ('show_poke', "显示戳一戳/拍一拍"),
+            '4': ('show_voice_to_text', "显示语音转文字结果"),
+            '5': ('show_media_info', "在消息中显示媒体尺寸等信息"),
+            '6': ('add_file_header', "在导出文件顶部添加摘要头"),
+            '7': ('export_non_friends', "导出非好友/临时会话"),
+            '8': ('export_format', "导出格式"),
+            '9': ('html_template', "HTML模板"),
+            '10': ('name_style', "用户标识格式")
         }
-        print("> 内容格式")
-        for k, (cfg_key, lbl) in content_options.items():
-            print(f"  {k}. [{'开' if temp_config.get(cfg_key) else '关'}] {lbl}")
-
-        other_options = {
-            '6': ('export_format', "导出格式"), '7': ('name_style', "用户标识格式"),
-            '8': ('add_file_header', "添加文件头"), '9': ('html_template', "HTML模板")
-        }
-        print("> 其他设置")
-        for k, (cfg_key, lbl) in other_options.items():
-            if cfg_key == 'name_style':
-                style_map = {'default': "备注/昵称", 'nickname': "昵称", 'qq': "QQ号", 'uid': "UID", 'custom': "自定义"}
-                print(f"  {k}. {lbl}: [{style_map.get(temp_config.get(cfg_key, 'default'), '未知')}]")
-            elif cfg_key == 'export_format':
-                print(f"  {k}. {lbl}: [{temp_config.get(cfg_key, 'md').upper()}]")
-            elif cfg_key == 'html_template':
-                print(f"  {k}. {lbl}: [{temp_config.get(cfg_key, 'default.html')}]")
+        
+        for key, (cfg_key, lbl) in all_options.items():
+            current_value_str = ""
+            if cfg_key in ['name_style', 'export_format', 'html_template']:
+                if cfg_key == 'name_style':
+                    style_map = {'default': "备注/昵称", 'nickname': "昵称", 'qq': "QQ号", 'uid': "UID", 'custom': "自定义"}
+                    current_value_str = f": [{style_map.get(temp_config.get(cfg_key, 'default'), '未知')}]"
+                elif cfg_key == 'export_format':
+                    current_value_str = f": [{temp_config.get(cfg_key, 'md').upper()}]"
+                elif cfg_key == 'html_template':
+                    current_value_str = f": [{temp_config.get(cfg_key, 'default.html')}]"
             else:
-                print(f"  {k}. [{'开' if temp_config.get(cfg_key) else '关'}] {lbl}")
+                current_value_str = f": [{'开' if temp_config.get(cfg_key) else '关'}]"
+            
+            print(f"{key}. {lbl}{current_value_str}")
 
-        choice_str = input("请输入要操作的选项序号 (可多选，如 123)，回车键保存并返回: ").strip()
+        choice_str = input("请输入要操作的选项序号 (可多选，如 1 8 10)，回车键保存并返回: ").strip()
 
         if not choice_str:
             config_mgr.config = temp_config
             config_mgr.save_config()
             break
         
-        selected_keys = re.findall(r'\d', choice_str)
+        selected_keys = re.split(r'[\s,]+', choice_str)
         toggled = False
-        all_options = {**content_options, **other_options}
+
         for key in selected_keys:
             if key in all_options:
                 config_key, label = all_options[key]
@@ -1029,7 +1098,7 @@ def manage_export_config(path_title, config_mgr):
                     temp_config[config_key] = not temp_config.get(config_key)
                 toggled = True
 
-        if not toggled:
+        if not toggled and not any(key in all_options for key in selected_keys):
             break
 
 def select_user_list_mode(path_title):
@@ -1064,54 +1133,76 @@ def select_name_style(path_title):
             return style, custom_fmt
         print("  -> 无效输入，请重试。")
 
-def select_friends(profile_mgr, path_title):
+def select_friends(profile_mgr, config_mgr, path_title):
     """
     【交互功能】提供一个可交互的菜单让用户选择一个或多个好友。
     支持按分组查看或全部展开，全部展开时会保留分组标题。
     """
-    friends_by_group = {}
-    for uid, info in profile_mgr.user_info.items():
-        if uid == profile_mgr.my_uid: continue
-        gid = info['group_id']
-        if gid not in friends_by_group: friends_by_group[gid] = []
-        friends_by_group[gid].append(uid)
+    groups_with_friends = {}
     
+    # 填充好友分组
+    for uid, info in profile_mgr.all_users.items():
+        if uid == profile_mgr.my_uid or not info.get('is_friend'):
+            continue
+        gid = info['group_id']
+        if gid not in groups_with_friends:
+            groups_with_friends[gid] = []
+        groups_with_friends[gid].append(uid)
+            
+    # 如果开启了非好友导出，添加特殊分组
+    if config_mgr.config.get('export_non_friends', True) and profile_mgr.non_friend_uids:
+        groups_with_friends[-2] = profile_mgr.non_friend_uids # 使用-2作为非好友的特殊ID
+        
     while True:
         print(f"\n--- {path_title} ---")
-        sorted_groups = sorted(friends_by_group.items(), key=lambda i: profile_mgr.group_info.get(i[0], str(i[0])))
-        choices = {str(i+1): gid for i, (gid, uids) in enumerate(sorted_groups)}
-        for i, (gid, uids) in enumerate(sorted_groups):
-            name = profile_mgr.group_info.get(gid, f"分组_{gid}")
-            print(f"  {i+1}. {name} ({len(uids)}人)")
+        
+        display_groups = {}
+        # 确保分组存在才显示
+        for gid, uids in groups_with_friends.items():
+            if gid == -2:
+                name = "[非好友/临时会话]"
+            else:
+                name = profile_mgr.group_info.get(gid, f"分组_{gid}")
+            display_groups[gid] = {'name': name, 'uids': uids}
+
+        sorted_display_groups = sorted(display_groups.items(), key=lambda i: i[0])
+        
+        choices = {str(i+1): gid for i, (gid, data) in enumerate(sorted_display_groups)}
+        for i, (gid, data) in enumerate(sorted_display_groups):
+            print(f"  {i+1}. {data['name']} ({len(data['uids'])}人)")
+            
         print("  a. 全部展开")
-        choice = input("请选择分组序号或'a'全部展开: ").strip().lower()
+        choice = input("请选择分组序号或'a'全部展开 (回车返回): ").strip().lower()
+
+        if not choice: return None
         
         gids_to_show = []
         group_name_for_title = ""
         if choice == 'a':
-            gids_to_show = [gid for gid, uids in sorted_groups]
+            gids_to_show = [gid for gid, data in sorted_display_groups]
             group_name_for_title = "全部展开"
         elif choice in choices:
             selected_gid = choices[choice]
             gids_to_show.append(selected_gid)
-            group_name_for_title = profile_mgr.group_info.get(selected_gid, f"分组_{selected_gid}")
+            group_name_for_title = display_groups.get(selected_gid, {}).get('name', '')
         else:
-            return None # 无效输入则返回
+            print("  -> 无效输入，请重试。")
+            continue
 
         print(f"\n--- {path_title} > {group_name_for_title} ---")
         selectable = {}
         i = 1
         for gid in gids_to_show:
-            if choice == 'a': # 如果是全部展开模式，额外显示分组标题
-                current_group_name = profile_mgr.group_info.get(gid, f"分组_{gid}")
+            if choice == 'a':
+                current_group_name = display_groups.get(gid, {}).get('name', f"分组_{gid}")
                 print(f"\n--- {current_group_name} ---")
             
-            if not friends_by_group.get(gid):
-                print("  (此分组下没有好友)")
+            if not groups_with_friends.get(gid):
+                print("  (此分组下没有用户)")
                 continue
             
-            for uid in friends_by_group[gid]:
-                info = profile_mgr.user_info[uid]
+            for uid in groups_with_friends[gid]:
+                info = profile_mgr.all_users[uid]
                 remark = f" (备注: {info['remark']})" if info['remark'] else ""
                 display = f"{info['nickname'] or info['qq']}{remark} (QQ: {info['qq']})"
                 print(f"  {i}. {display}")
@@ -1119,43 +1210,56 @@ def select_friends(profile_mgr, path_title):
                 i += 1
         
         if not selectable:
-            print("没有可供选择的好友。")
+            print("没有可供选择的用户。")
             continue
             
-        choices_str = input("请输入好友序号 (可多选，用空格或逗号分隔): ").strip()
+        choices_str = input("请输入用户序号 (可多选，用空格或逗号分隔): ").strip()
         selected = [selectable[c] for c in re.split(r'[\s,]+', choices_str) if c in selectable]
         if selected: return list(set(selected))
-        # 无效或空输入，循环回到分组选择
         continue
 
-
-def select_group(profile_mgr, path_title):
+def select_group(profile_mgr, config_mgr, path_title):
     """让用户从分组列表中选择一个分组。"""
     print(f"\n--- {path_title} ---")
-    friends_by_group = {info.get('group_id'): [] for uid, info in profile_mgr.user_info.items() if uid != profile_mgr.my_uid}
-    for uid, info in profile_mgr.user_info.items():
-        if uid != profile_mgr.my_uid: friends_by_group[info.get('group_id')].append(uid)
     
-    sorted_groups = sorted(profile_mgr.group_info.items(), key=lambda i: i[1])
-    choices = {str(i+1): gid for i, (gid, name) in enumerate(sorted_groups)}
+    friends_by_group = {}
+    for uid, info in profile_mgr.all_users.items():
+        if uid != profile_mgr.my_uid and info.get('is_friend'):
+            gid = info.get('group_id')
+            if gid not in friends_by_group: friends_by_group[gid] = []
+            friends_by_group[gid].append(uid)
     
-    print("  a. 全部导出")
-    for i, (gid, name) in enumerate(sorted_groups):
-        count = len(friends_by_group.get(gid, []))
+    # 动态构建用于显示的分组列表
+    display_groups = [(gid, name) for gid, name in profile_mgr.group_info.items()]
+    display_groups.sort(key=lambda item: item[1]) # 按名称排序
+    
+    if config_mgr.config.get('export_non_friends', True) and profile_mgr.non_friend_uids:
+        display_groups.append((-2, "[非好友/临时会话]"))
+
+    choices = {str(i+1): gid for i, (gid, name) in enumerate(display_groups)}
+    
+    print("  a. 全部好友")
+    for i, (gid, name) in enumerate(display_groups):
+        if gid == -2:
+            count = len(profile_mgr.non_friend_uids)
+        else:
+            count = len(friends_by_group.get(gid, []))
+        if count == 0 and gid != -2: continue
         print(f"  {i+1}. {name} ({count}人)")
 
     while True:
-        choice = input(f"请输入分组序号: ").strip().lower()
+        choice = input(f"请输入分组序号 (回车返回): ").strip().lower()
+        if not choice: return None
         if choice == 'a':
             return 'all_groups'
         if choice in choices: 
             return choices[choice]
-        return None # 无效输入则返回
+        print("  -> 无效输入，请重试。")
+        return None
 
 # --- 导出执行逻辑 ---
 def _write_txt(f, rows, profile_mgr, config):
     """将聊天记录写入纯文本文件"""
-    # ... (此函数内容未改变)
     name_style = config.get('name_style', 'default')
     name_format = config.get('name_format', '')
     count = 0
@@ -1193,7 +1297,6 @@ def _write_txt(f, rows, profile_mgr, config):
 
 def _write_md(f, rows, profile_mgr, config):
     """将聊天记录写入Markdown文件"""
-    # ... (此函数内容未改变)
     name_style = config.get('name_style', 'default')
     name_format = config.get('name_format', '')
     count = 0
@@ -1392,21 +1495,28 @@ def _write_html(f, rows, profile_mgr, config, scope_info):
     return len(rows)
 
 def process_and_write(output_path, rows, profile_mgr, config, scope_info):
-    """将查询到的数据库行处理并写入文件，支持txt、md、html三种格式。"""
+    """将查询到的数据库行处理并写入文件，支持txt、md、html三种格式。如果有效消息为0，则不创建文件。"""
     export_format = config['export_config'].get('export_format', 'md')
     count = 0
+    
+    # 预处理，检查是否有有效消息
+    valid_rows = [row for row in rows if decode_message_content(row[3], row[0], profile_mgr, config['name_style'], config['name_format'], config['export_config'], config.get('is_timeline', False))]
+    
+    if not valid_rows:
+        return 0 # 没有有效消息，直接返回，不创建文件
+
     with open(output_path, "w", encoding="utf-8") as f:
         if export_format == 'html':
-            count = _write_html(f, rows, profile_mgr, config, scope_info)
+            count = _write_html(f, valid_rows, profile_mgr, config, scope_info)
         else:
-            header_content = _generate_text_header(config, rows, scope_info)
+            header_content = _generate_text_header(config, valid_rows, scope_info)
             if header_content:
                 f.write(header_content)
             
             if export_format == 'md':
-                count = _write_md(f, rows, profile_mgr, config)
+                count = _write_md(f, valid_rows, profile_mgr, config)
             else: # 默认为 txt
-                count = _write_txt(f, rows, profile_mgr, config)
+                count = _write_txt(f, valid_rows, profile_mgr, config)
             
     return count
 
@@ -1452,21 +1562,21 @@ def export_timeline(db_con, config, target_uids, scope_info):
     process_config = config.copy()
     process_config['is_timeline'] = True
     count = process_and_write(path, rows, profile_mgr, process_config, scope_info)
-    print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
+    if count > 0:
+        print(f"\n处理完成！共导出 {count} 条有效消息到 {path}")
+    else:
+        print("\n处理完成，但在指定范围内未发现可导出的有效消息。")
 
 def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, index=None, total=None):
     """导出一个好友的一对一聊天记录。"""
     start_ts, end_ts, name_style, name_format, profile_mgr, run_timestamp, export_config = config.values()
     
-    friend_info = profile_mgr.user_info.get(friend_uid, {})
+    friend_info = profile_mgr.all_users.get(friend_uid, {})
     friend_nickname = friend_info.get('nickname', friend_uid)
     friend_remark = friend_info.get('remark', '')
-    friend_display_name = f"{friend_nickname or friend_uid}{f'(备注-{friend_remark})' if friend_remark else ''}"
+    friend_display_name = f"{friend_nickname or friend_uid}{f' (备注-{friend_remark})' if friend_remark else ''}"
     
-    if index and total:
-        print(f"正在导出 ({index}/{total}) {friend_display_name}... ", end="")
-    else:
-        print(f"\n正在导出与 {friend_display_name} 的聊天记录...")
+    log_prefix = f"    ({index}/{total}) {friend_display_name}"
     
     query = f"SELECT `{COL_TIMESTAMP}`, `{COL_SENDER_UID}`, `{COL_PEER_UID}`, `{COL_MSG_CONTENT}` FROM {TABLE_NAME}"
     clauses = [f"`{COL_PEER_UID}` = ?"]
@@ -1484,7 +1594,7 @@ def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, inde
     cur.execute(query, params)
     rows = cur.fetchall()
     if not rows:
-        print(f"-> 与 {friend_display_name} 在指定时间内无聊天记录。")
+        print(f"{log_prefix}... -> 指定时间内无聊天记录。")
         return
 
     output_dir = out_dir or os.path.join(OUTPUT_DIR, "Individual")
@@ -1495,7 +1605,12 @@ def export_one_on_one(db_con, friend_uid, config, scope_info, out_dir=None, inde
     process_config = config.copy()
     process_config['is_timeline'] = False
     count = process_and_write(path, rows, profile_mgr, process_config, scope_info)
-    print(f"-> 共导出 {count} 条消息到 {path}")
+    
+    if count > 0:
+        print(f"{log_prefix}... -> 共导出 {count} 条消息到 \"{filename}\"")
+    else:
+        print(f"{log_prefix}... -> 指定时间内无有效消息可导出。")
+
 
 def export_user_list(profile_mgr, list_mode, timestamp_str):
     """
@@ -1504,11 +1619,11 @@ def export_user_list(profile_mgr, list_mode, timestamp_str):
     """
     if list_mode == 1:
         print("\n正在导出好友列表...")
-        users_to_export = profile_mgr.user_info
+        users_to_export = {uid: info for uid, info in profile_mgr.all_users.items() if info.get('is_friend')}
         base_filename = _FRIENDS_LIST_FILENAME
     else: # list_mode == 2
         print("\n正在导出全部缓存用户列表...")
-        users_to_export = profile_mgr.all_profiles_cache
+        users_to_export = profile_mgr.all_users
         base_filename = _ALL_USERS_LIST_FILENAME
 
     name, ext = os.path.splitext(base_filename)
@@ -1539,13 +1654,14 @@ def main():
     args = parser.parse_args()
 
     # 设置基础路径变量
-    global DB_PATH, PROFILE_DB_PATH, OUTPUT_DIR, CONFIG_PATH, TEMPLATE_DIR_PATH
+    global DB_PATH, PROFILE_DB_PATH, OUTPUT_DIR, CONFIG_PATH, TEMPLATE_DIR_PATH, NON_FRIENDS_CACHE_PATH
     workdir = args.workdir
     script_dir = os.path.dirname(os.path.abspath(__file__))
     DB_PATH = os.path.join(workdir, _DB_FILENAME)
     PROFILE_DB_PATH = os.path.join(workdir, _PROFILE_DB_FILENAME)
     CONFIG_PATH = os.path.join(script_dir, _CONFIG_FILENAME)
     TEMPLATE_DIR_PATH = os.path.join(script_dir, _TEMPLATE_DIR_NAME)
+    NON_FRIENDS_CACHE_PATH = os.path.join(script_dir, _NON_FRIENDS_CACHE_FILENAME)
 
 
     print("===== QQ聊天记录导出工具 =====")
@@ -1555,6 +1671,7 @@ def main():
     profile_mgr = ProfileManager(PROFILE_DB_PATH)
     profile_mgr.load_data()
     config_mgr = ConfigManager(CONFIG_PATH)
+    profile_mgr.load_non_friends(config_mgr) # 扫描并加载非好友
 
     # 1.5. 动态设置最终的输出根目录
     OUTPUT_DIR = os.path.join(workdir, f"{profile_mgr.my_qq}_output")
@@ -1578,6 +1695,8 @@ def main():
 
         if mode == 8: # 设置
             manage_export_config(path_title, config_mgr)
+            # 重新加载非好友列表以响应配置变化
+            profile_mgr.load_non_friends(config_mgr)
             continue
             
         if mode == 7: # 导出用户信息列表
@@ -1591,29 +1710,36 @@ def main():
         target_uids = []
         is_timeline_mode = mode in [1, 2, 3]
         scope_info = {}
-        gid_or_all = None
+        selection = None
         
         # 根据模式获取目标用户UIDs和范围信息
         if mode == 1 or mode == 4:
-            target_uids = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
+            target_uids = list(profile_mgr.friend_uids)
+            if config_mgr.config.get('export_non_friends'):
+                target_uids.extend(profile_mgr.non_friend_uids)
             scope_info = {'type': 'timeline', 'selection_mode': 'all_friends'}
         elif mode == 2 or mode == 5:
-            gid_or_all = select_group(profile_mgr, path_title)
-            if gid_or_all is None: continue
-            if gid_or_all == 'all_groups':
-                target_uids = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
+            selection = select_group(profile_mgr, config_mgr, path_title)
+            if selection is None: continue
+            if selection == 'all_groups':
+                target_uids = list(profile_mgr.friend_uids)
+                if config_mgr.config.get('export_non_friends', True):
+                     target_uids.extend(profile_mgr.non_friend_uids)
                 if mode == 5: target_uids = 'all_groups_structured'
                 scope_info = {'type': 'timeline', 'selection_mode': 'all_groups'}
             else:
-                target_uids = [uid for uid, info in profile_mgr.user_info.items() if info.get('group_id') == gid_or_all]
-                scope_info = {'type': 'timeline', 'selection_mode': 'group', 'details': {'gid': gid_or_all, 'count': len(target_uids)}}
+                if selection == -2: # 非好友
+                    target_uids = profile_mgr.non_friend_uids
+                else: # 普通分组
+                    target_uids = [uid for uid, info in profile_mgr.all_users.items() if info.get('group_id') == selection and info.get('is_friend')]
+                scope_info = {'type': 'timeline', 'selection_mode': 'group', 'details': {'gid': selection, 'count': len(target_uids)}}
         elif mode == 3 or mode == 6:
-            target_uids = select_friends(profile_mgr, path_title)
+            target_uids = select_friends(profile_mgr, config_mgr, path_title)
             if not target_uids: continue
             scope_info = {'type': 'timeline', 'selection_mode': 'selected_friends', 'details': {'uids': target_uids}}
 
-        if not target_uids:
-            print("未选择任何好友或分组内无好友。")
+        if not target_uids and target_uids != 'all_groups_structured':
+            print("未选择任何用户或分组内无用户。")
             continue
             
         start_ts, end_ts = get_time_range(f"{path_title} > 设定时间范围")
@@ -1637,32 +1763,46 @@ def main():
                 else: # 单独文件模式
                     if target_uids == 'all_groups_structured':
                         print("\n即将按分组结构导出所有好友...")
-                        all_friends = [uid for uid in profile_mgr.user_info.keys() if uid != profile_mgr.my_uid]
                         groups_data = {}
-                        for uid in all_friends:
-                            gid = profile_mgr.user_info.get(uid, {}).get('group_id', -1)
+                        # 处理好友
+                        for uid in profile_mgr.friend_uids:
+                            gid = profile_mgr.all_users.get(uid, {}).get('group_id', -1)
                             if gid not in groups_data:
-                                group_name = profile_mgr.group_info.get(gid, f"分组{gid}")
-                                safe_group_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid}_{group_name}")
-                                group_dir = os.path.join(OUTPUT_DIR, "Individual", safe_group_name)
-                                groups_data[gid] = {'dir': group_dir, 'friends': []}
-                            groups_data[gid]['friends'].append(uid)
+                                g_name = profile_mgr.group_info.get(gid, f"分组{gid}")
+                                safe_g_name = re.sub(r'[\\/*?:"<>|]', "_", f"{gid}_{g_name}")
+                                g_dir = os.path.join(OUTPUT_DIR, "Individual", "Friends", safe_g_name)
+                                groups_data[gid] = {'dir': g_dir, 'users': []}
+                            groups_data[gid]['users'].append(uid)
                         
-                        total_friends_count = len(all_friends)
-                        current_friend_index = 0
-                        for gid in sorted(groups_data.keys()):
+                        # 处理非好友
+                        if config_mgr.config.get('export_non_friends', True):
+                            non_friend_gid = -2
+                            non_friend_dir = os.path.join(OUTPUT_DIR, "Individual", "Friends", "_非好友_")
+                            groups_data[non_friend_gid] = {'dir': non_friend_dir, 'users': profile_mgr.non_friend_uids}
+
+                        total_users_count = len(profile_mgr.friend_uids) + (len(profile_mgr.non_friend_uids) if config_mgr.config.get('export_non_friends') else 0)
+                        current_user_index = 0
+                        
+                        sorted_gids = sorted(groups_data.keys())
+                        for gid in sorted_gids:
                             group_info_struct = groups_data[gid]
-                            for friend_uid in group_info_struct['friends']:
-                                current_friend_index += 1
-                                individual_scope_info = {'type': 'individual', 'friend_uid': friend_uid}
-                                export_one_on_one(con, friend_uid, config, individual_scope_info, group_info_struct['dir'], current_friend_index, total_friends_count)
+                            print(f"\n以下文件导出到 \"{os.path.relpath(group_info_struct['dir'], workdir)}\"")
+                            for user_uid in group_info_struct['users']:
+                                current_user_index += 1
+                                individual_scope_info = {'type': 'individual', 'friend_uid': user_uid}
+                                export_one_on_one(con, user_uid, config, individual_scope_info, group_info_struct['dir'], current_user_index, total_users_count)
                     else:
-                        output_dir = None
+                        output_dir = os.path.join(OUTPUT_DIR, "Individual")
                         if mode == 5:
-                             name = profile_mgr.group_info.get(gid_or_all, f"分组{gid_or_all}")
-                             safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{gid_or_all}_{name}")
-                             output_dir = os.path.join(OUTPUT_DIR, "Individual", safe_name)
+                             if selection == -2: #非好友
+                                 name = "_非好友_"
+                                 output_dir = os.path.join(output_dir, "Friends", name)
+                             else: # 普通分组
+                                 name = profile_mgr.group_info.get(selection, f"分组{selection}")
+                                 safe_name = re.sub(r'[\\/*?:"<>|]', "_", f"{selection}_{name}")
+                                 output_dir = os.path.join(output_dir, "Friends", safe_name)
                         
+                        print(f"\n以下文件将导出到 \"{os.path.relpath(output_dir, workdir)}\"")
                         total = len(target_uids)
                         for i, uid in enumerate(target_uids):
                             individual_scope_info = {'type': 'individual', 'friend_uid': uid}
