@@ -162,4 +162,4 @@ _输出_
 数据库连接已关闭。
 ```
 
-> QQNT 的数据库、表名、列名含义，以及 protobuf 定义参考：https://github.com/AnotherUser/AnotherRepo/
+> QQNT 的数据库、表名、列名含义，以及 protobuf 定义参考：https://github.com/QQBackup/QQDecrypt/tree/main/docs/view/db_file_analysis
